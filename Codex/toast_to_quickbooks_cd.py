@@ -187,20 +187,99 @@ class ToastAPIClient:
             logger.warning(f"Không lấy được cash management data: {e}")
             return []
 
-    def aggregate_daily_sales(self, orders: list) -> dict:
+    # -----------------------------------------------------------------
+    # Menu & Dining Option cache  (gọi 1 lần/ngày, dùng lại khi aggregate)
+    # -----------------------------------------------------------------
+
+    def get_menu_groups(self) -> dict:
         """
-        Tổng hợp dữ liệu bán hàng từ danh sách đơn hàng.
-        
-        Tạo ra các số liệu cần thiết để tạo Journal Entry:
-            - Tổng doanh thu (gross sales)
-            - Giảm giá (discounts)
-            - Thuế (tax)
-            - Tips
-            - Thanh toán tiền mặt (cash)
-            - Thanh toán thẻ (credit card)
-            - Thanh toán khác (gift card, etc.)
-            - Phí dịch vụ (service charges)
+        Lấy danh sách MenuGroup từ config API.
+        Trả về dict  { guid: group_name }
+        VD: {"1c6187fa-...": "Food", "500feeaa-...": "Bar"}
         """
+        url = f"{self.api_hostname}/config/v2/menuGroups"
+        logger.info("Lấy danh sách MenuGroup từ Toast...")
+        try:
+            resp = requests.get(url, headers=self._get_headers(), timeout=60)
+            resp.raise_for_status()
+            return {g["guid"]: g.get("name", "Unknown") for g in resp.json()}
+        except Exception as e:
+            logger.warning(f"Không lấy được MenuGroup: {e}")
+            return {}
+
+    def get_dining_options(self) -> dict:
+        """
+        Lấy danh sách DiningOption từ config API.
+        Trả về dict  { guid: option_name }
+        VD: {"23fc...": "Dine In", "b1b1...": "Delivery"}
+        """
+        url = f"{self.api_hostname}/config/v2/diningOptions"
+        logger.info("Lấy danh sách DiningOption từ Toast...")
+        try:
+            resp = requests.get(url, headers=self._get_headers(), timeout=60)
+            resp.raise_for_status()
+            return {d["guid"]: d.get("name", "Unknown") for d in resp.json()}
+        except Exception as e:
+            logger.warning(f"Không lấy được DiningOption: {e}")
+            return {}
+
+    def get_revenue_centers(self) -> dict:
+        """
+        Lấy danh sách RevenueCenter.
+        Trả về dict  { guid: center_name }
+        """
+        url = f"{self.api_hostname}/config/v2/revenueCenters"
+        logger.info("Lấy danh sách RevenueCenter từ Toast...")
+        try:
+            resp = requests.get(url, headers=self._get_headers(), timeout=60)
+            resp.raise_for_status()
+            return {r["guid"]: r.get("name", "Unknown") for r in resp.json()}
+        except Exception as e:
+            logger.warning(f"Không lấy được RevenueCenter: {e}")
+            return {}
+
+    # -----------------------------------------------------------------
+    # Aggregate v2 – tách theo sales_category + order source/channel
+    # -----------------------------------------------------------------
+
+    def aggregate_daily_sales(
+        self,
+        orders: list,
+        menu_groups: dict | None = None,
+        dining_options: dict | None = None,
+        revenue_centers: dict | None = None,
+        category_rules: dict | None = None,
+    ) -> dict:
+        """
+        Tổng hợp dữ liệu bán hàng, **tách theo sales category & order source**.
+
+        Cách phân loại doanh thu (sales_by_category):
+          - Mỗi selection có itemGroup.guid → tra menu_groups → group name
+          - group name được map vào category nhờ category_rules trong config
+          - VD: group "Appetizers", "Entrees", "Desserts" → category "food"
+                group "Beer", "Wine", "Cocktails"        → category "bar"
+          - Nếu không match rule nào → category "other"
+
+        Cách phân loại theo kênh bán (sales_by_source):
+          - order.source chứa giá trị như "In Store", "API", "Online",
+            "Grubhub", "DoorDash", "Uber Eats", v.v.
+          - Hoặc dùng order.diningOption → tra dining_options → tên
+          - Config có source_rules để map source/diningOption → channel key
+
+        Returns:
+            dict giống bản cũ + thêm:
+              "sales_by_category": {"food": Decimal, "bar": Decimal, ...}
+              "sales_by_source":   {"in_store": Decimal, "doordash": Decimal, ...}
+        """
+        if menu_groups is None:
+            menu_groups = {}
+        if dining_options is None:
+            dining_options = {}
+        if revenue_centers is None:
+            revenue_centers = {}
+        if category_rules is None:
+            category_rules = {}
+
         summary = {
             "gross_sales": Decimal("0"),
             "discounts": Decimal("0"),
@@ -214,45 +293,98 @@ class ToastAPIClient:
             "refunds": Decimal("0"),
             "net_sales": Decimal("0"),
             "order_count": 0,
-            # Chi tiết theo revenue center (nếu có)
+            # ---- MỚI ----
+            "sales_by_category": {},   # {"food": Decimal, "bar": Decimal, ...}
+            "sales_by_source": {},     # {"in_store": Decimal, "doordash": Decimal, ...}
             "by_revenue_center": {},
         }
 
+        # Hàm helper: tra tên group → category key
+        group_to_cat = category_rules.get("menu_group_to_category", {})
+        source_to_channel = category_rules.get("source_to_channel", {})
+        default_category = category_rules.get("default_category", "other")
+        default_channel = category_rules.get("default_channel", "in_store")
+
+        def _resolve_category(item_group_guid: str) -> str:
+            group_name = menu_groups.get(item_group_guid, "").lower()
+            # Tìm trong mapping  (key = substring match)
+            for pattern, cat in group_to_cat.items():
+                if pattern.lower() in group_name:
+                    return cat
+            return default_category
+
+        def _resolve_channel(order: dict) -> str:
+            # Ưu tiên 1: source (VD "Grubhub", "DoorDash", "Uber Eats")
+            source = (order.get("source") or "").strip()
+            source_lower = source.lower()
+            for pattern, ch in source_to_channel.items():
+                if pattern.lower() in source_lower:
+                    return ch
+            # Ưu tiên 2: diningOption name
+            do_guid = (order.get("diningOption") or {}).get("guid", "")
+            do_name = dining_options.get(do_guid, "").lower()
+            for pattern, ch in source_to_channel.items():
+                if pattern.lower() in do_name:
+                    return ch
+            return default_channel
+
         for order in orders:
-            # Bỏ qua đơn hàng bị void/deleted
             if order.get("voided") or order.get("deleted"):
                 continue
 
             summary["order_count"] += 1
+            channel = _resolve_channel(order)
+
+            # Revenue center
+            rc_guid = (order.get("revenueCenter") or {}).get("guid", "")
+            rc_name = revenue_centers.get(rc_guid, rc_guid) if rc_guid else ""
 
             for check in order.get("checks", []):
                 if check.get("voided") or check.get("deleted"):
                     continue
 
-                # Tổng hợp từ check
-                check_amount = Decimal(str(check.get("totalAmount", 0)))
                 tax_amount = Decimal(str(check.get("taxAmount", 0)))
-                
-                # Tính gross sales = totalAmount - tax
-                summary["gross_sales"] += check_amount - tax_amount
                 summary["tax"] += tax_amount
 
-                # Discounts
-                for applied_discount in check.get("appliedDiscounts", []):
-                    discount_amt = Decimal(str(applied_discount.get("discountAmount", 0)))
-                    summary["discounts"] += discount_amt
-                    # Cộng lại vào gross sales vì totalAmount đã trừ discount
-                    summary["gross_sales"] += discount_amt
+                # --- Selection-level breakdown ---
+                for sel in check.get("selections", []):
+                    if sel.get("voided"):
+                        continue
+                    price = Decimal(str(sel.get("price", 0)))
+                    qty = int(sel.get("quantity", 1))
+                    pre_discount = Decimal(str(sel.get("preDiscountPrice", price)))
+                    line_total = pre_discount  # preDiscountPrice đã nhân qty
 
-                # Payments
+                    ig_guid = (sel.get("itemGroup") or {}).get("guid", "")
+                    cat = _resolve_category(ig_guid)
+
+                    # Cộng vào category
+                    summary["sales_by_category"].setdefault(cat, Decimal("0"))
+                    summary["sales_by_category"][cat] += line_total
+
+                    # Cộng vào source/channel
+                    summary["sales_by_source"].setdefault(channel, Decimal("0"))
+                    summary["sales_by_source"][channel] += line_total
+
+                    # Revenue center
+                    if rc_name:
+                        summary["by_revenue_center"].setdefault(rc_name, Decimal("0"))
+                        summary["by_revenue_center"][rc_name] += line_total
+
+                    summary["gross_sales"] += line_total
+
+                # --- Check-level: discounts ---
+                for ad in check.get("appliedDiscounts", []):
+                    summary["discounts"] += Decimal(str(ad.get("discountAmount", 0)))
+
+                # --- Check-level: payments ---
                 for payment in check.get("payments", []):
                     if payment.get("voidInfo"):
                         continue
-
                     pay_amount = Decimal(str(payment.get("amount", 0)))
                     tip_amount = Decimal(str(payment.get("tipAmount", 0)))
-                    pay_type = payment.get("type", "").upper()
-                    
+                    pay_type = (payment.get("type") or "").upper()
+
                     summary["tips"] += tip_amount
 
                     if pay_type == "CASH":
@@ -266,18 +398,22 @@ class ToastAPIClient:
                     else:
                         summary["other_payments"] += pay_amount
 
-                # Service charges
+                # --- Check-level: service charges ---
                 for sc in check.get("appliedServiceCharges", []):
-                    sc_amount = Decimal(str(sc.get("chargeAmount", 0)))
-                    summary["service_charges"] += sc_amount
+                    summary["service_charges"] += Decimal(str(sc.get("chargeAmount", 0)))
 
-        # Net sales = gross - discounts
         summary["net_sales"] = summary["gross_sales"] - summary["discounts"]
 
-        # Làm tròn
-        for key in summary:
-            if isinstance(summary[key], Decimal):
-                summary[key] = summary[key].quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        # Làm tròn tất cả Decimal
+        def _round(d):
+            return d.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+        for key in list(summary.keys()):
+            val = summary[key]
+            if isinstance(val, Decimal):
+                summary[key] = _round(val)
+            elif isinstance(val, dict):
+                summary[key] = {k: _round(v) for k, v in val.items() if isinstance(v, Decimal)}
 
         return summary
 
@@ -553,6 +689,21 @@ class ToastQBSyncEngine:
         
         # Account mapping từ config
         self.account_map = config.get("account_mapping", {})
+        # Category/source classification rules
+        self.category_rules = config.get("category_rules", {})
+        # Caches (populated once per run)
+        self._menu_groups = None
+        self._dining_options = None
+        self._revenue_centers = None
+
+    def _ensure_caches(self):
+        """Fetch menu_groups, dining_options, revenue_centers một lần."""
+        if self._menu_groups is None:
+            self._menu_groups = self.toast.get_menu_groups()
+        if self._dining_options is None:
+            self._dining_options = self.toast.get_dining_options()
+        if self._revenue_centers is None:
+            self._revenue_centers = self.toast.get_revenue_centers()
 
     def sync_date(self, date: datetime) -> dict:
         """
@@ -594,8 +745,15 @@ class ToastQBSyncEngine:
             logger.error(f"Lỗi lấy dữ liệu Toast: {e}")
             return {"success": False, "message": f"Toast API error: {e}"}
 
-        # Bước 2: Tổng hợp doanh thu
-        summary = self.toast.aggregate_daily_sales(orders)
+        # Bước 2: Tổng hợp doanh thu (với phân loại category & source)
+        self._ensure_caches()
+        summary = self.toast.aggregate_daily_sales(
+            orders,
+            menu_groups=self._menu_groups,
+            dining_options=self._dining_options,
+            revenue_centers=self._revenue_centers,
+            category_rules=self.category_rules,
+        )
         self._log_summary(date_display, summary)
 
         # Bước 3: Tạo Journal Entry lines
@@ -650,26 +808,26 @@ class ToastQBSyncEngine:
         """
         Chuyển đổi báo cáo doanh thu thành các dòng Journal Entry.
         
-        Nguyên tắc kế toán cơ bản cho nhà hàng:
+        DEBIT (Nợ):
+            - Cash / CC / Gift Card / Other (theo phương thức thanh toán)
+            - Discounts (contra revenue)
         
-        DEBIT (Nợ) - Tiền vào:
-            - Cash in drawer          (Tiền mặt trong két)
-            - Credit card receivable   (Phải thu thẻ tín dụng)
-            - Gift card receivable     (Phải thu gift card)
-            - Discounts               (Giảm giá - contra revenue)
+        CREDIT (Có):
+            - Doanh thu **tách theo category** (food, bar, …)
+            - Doanh thu **tách theo kênh delivery** (doordash, uber, grubhub, …)
+            - Sales Tax Payable / Tips Payable / Service Charges
         
-        CREDIT (Có) - Nguồn tiền:
-            - Food/Beverage Sales      (Doanh thu)
-            - Sales Tax Payable        (Thuế phải nộp)
-            - Tips Payable             (Tips phải trả nhân viên)
-            - Service Charge Income    (Thu phí dịch vụ)
+        Logic:
+          Nếu config có "category_account_map" → credit mỗi category riêng.
+          Nếu không → fallback về 1 tài khoản sales_revenue gộp (backward-compat).
         """
-        am = self.account_map  # Shortcut
+        am = self.account_map
+        cat_map = am.get("category_account_map", {})   # {"food": "Food Sales", "bar": "Bar Sales", …}
+        src_map = am.get("source_account_map", {})      # {"doordash": "DoorDash Revenue", …}
         lines = []
 
-        # === DEBIT LINES (Tài sản tăng / Chi phí tăng) ===
-        
-        # Tiền mặt nhận được
+        # === DEBIT LINES ===
+
         if summary["cash_payments"] > 0:
             lines.append({
                 "type": "debit",
@@ -678,7 +836,6 @@ class ToastQBSyncEngine:
                 "memo": "Cash payments from Toast",
             })
 
-        # Phải thu từ thẻ tín dụng
         if summary["credit_card_payments"] > 0:
             lines.append({
                 "type": "debit",
@@ -687,7 +844,6 @@ class ToastQBSyncEngine:
                 "memo": "Credit card payments from Toast",
             })
 
-        # Gift card
         if summary["gift_card_payments"] > 0:
             lines.append({
                 "type": "debit",
@@ -696,7 +852,6 @@ class ToastQBSyncEngine:
                 "memo": "Gift card payments from Toast",
             })
 
-        # Other payments
         if summary["other_payments"] > 0:
             lines.append({
                 "type": "debit",
@@ -705,7 +860,6 @@ class ToastQBSyncEngine:
                 "memo": "Other payments from Toast",
             })
 
-        # Discounts (contra revenue → debit)
         if summary["discounts"] > 0:
             lines.append({
                 "type": "debit",
@@ -714,7 +868,6 @@ class ToastQBSyncEngine:
                 "memo": "Discounts from Toast",
             })
 
-        # Refunds (giảm tài sản → debit nếu hoàn tiền)
         if summary["refunds"] > 0:
             lines.append({
                 "type": "credit",
@@ -723,19 +876,54 @@ class ToastQBSyncEngine:
                 "memo": "Refunds from Toast",
             })
 
-        # === CREDIT LINES (Doanh thu tăng / Nợ phải trả tăng) ===
+        # === CREDIT LINES – DOANH THU ===
 
-        # Doanh thu thuần (Net Sales = Gross - Discounts)
-        # Nhưng vì đã debit Discounts riêng, nên credit Gross Sales
-        if summary["gross_sales"] > 0:
+        # Chiến lược 1: tách theo category (food / bar / …)
+        # Chiến lược 2: tách theo source  (doordash / uber / in_store / …)
+        # Ưu tiên: nếu có source_account_map → dùng source; else dùng category; else gộp.
+
+        revenue_credited = Decimal("0")
+
+        if src_map and summary.get("sales_by_source"):
+            # --- Tách theo kênh bán ---
+            for src_key, amount in summary["sales_by_source"].items():
+                if amount <= 0:
+                    continue
+                acct = src_map.get(src_key, am.get("sales_revenue", "Food Sales"))
+                lines.append({
+                    "type": "credit",
+                    "account_name": acct,
+                    "amount": amount,
+                    "memo": f"Sales - {src_key}",
+                })
+                revenue_credited += amount
+
+        elif cat_map and summary.get("sales_by_category"):
+            # --- Tách theo category ---
+            for cat_key, amount in summary["sales_by_category"].items():
+                if amount <= 0:
+                    continue
+                acct = cat_map.get(cat_key, am.get("sales_revenue", "Food Sales"))
+                lines.append({
+                    "type": "credit",
+                    "account_name": acct,
+                    "amount": amount,
+                    "memo": f"Sales - {cat_key}",
+                })
+                revenue_credited += amount
+
+        # Fallback: nếu chưa credit đủ (hoặc chưa có map) → gộp
+        remainder = summary["gross_sales"] - revenue_credited
+        if remainder > 0:
             lines.append({
                 "type": "credit",
                 "account_name": am.get("sales_revenue", "Food Sales"),
-                "amount": summary["gross_sales"],
+                "amount": remainder,
                 "memo": "Gross sales from Toast",
             })
 
-        # Thuế phải nộp
+        # === CREDIT LINES – PHỤ ===
+
         if summary["tax"] > 0:
             lines.append({
                 "type": "credit",
@@ -744,7 +932,6 @@ class ToastQBSyncEngine:
                 "memo": "Sales tax from Toast",
             })
 
-        # Tips phải trả nhân viên
         if summary["tips"] > 0:
             lines.append({
                 "type": "credit",
@@ -753,7 +940,6 @@ class ToastQBSyncEngine:
                 "memo": "Tips from Toast",
             })
 
-        # Phí dịch vụ
         if summary["service_charges"] > 0:
             lines.append({
                 "type": "credit",
@@ -762,9 +948,7 @@ class ToastQBSyncEngine:
                 "memo": "Service charges from Toast",
             })
 
-        # Loại bỏ dòng có amount = 0
         lines = [l for l in lines if l["amount"] > 0]
-
         return lines
 
     def _log_summary(self, date: str, summary: dict):
@@ -779,6 +963,22 @@ class ToastQBSyncEngine:
         logger.info(f"  Thuế:                 ${summary['tax']:>12}")
         logger.info(f"  Tips:                 ${summary['tips']:>12}")
         logger.info(f"  Phí dịch vụ:          ${summary['service_charges']:>12}")
+
+        if summary.get("sales_by_category"):
+            logger.info(f"  ───── Doanh thu theo loại ─────")
+            for cat, amt in sorted(summary["sales_by_category"].items()):
+                logger.info(f"    {cat:<22} ${amt:>12}")
+
+        if summary.get("sales_by_source"):
+            logger.info(f"  ───── Doanh thu theo kênh ─────")
+            for src, amt in sorted(summary["sales_by_source"].items()):
+                logger.info(f"    {src:<22} ${amt:>12}")
+
+        if summary.get("by_revenue_center"):
+            logger.info(f"  ───── Theo Revenue Center ─────")
+            for rc, amt in sorted(summary["by_revenue_center"].items()):
+                logger.info(f"    {rc:<22} ${amt:>12}")
+
         logger.info(f"  ───── Thanh toán ─────")
         logger.info(f"  Tiền mặt:             ${summary['cash_payments']:>12}")
         logger.info(f"  Thẻ tín dụng:         ${summary['credit_card_payments']:>12}")

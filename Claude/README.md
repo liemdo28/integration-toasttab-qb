@@ -60,6 +60,12 @@ python toast_to_quickbooks.py --list-accounts
 
 Sau đó chỉnh sửa phần `account_mapping` trong `config.json` cho khớp tên tài khoản.
 
+> ✅ Bản mới hỗ trợ mapping chi tiết theo **nhóm doanh thu** và **nguồn thanh toán**:
+> - `account_mapping.sales_by_category`: tách `Food Sales`, `Bar Sales`, ...
+> - `account_mapping.payment_source`: tách `CC25`, `DOORD`, `GrubH`, `Ube`, ...
+>
+> Nếu không cấu hình 2 phần này, script vẫn chạy theo cơ chế cũ (gộp doanh thu + gộp payment).
+
 ---
 
 ## Sử dụng
