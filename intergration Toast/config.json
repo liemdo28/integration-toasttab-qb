@@ -1,7 +1,7 @@
 {
     "toast": {
         "client_id": "ljBK0f4hXJtd4OI0uFUCmwzGK58QDu9N",
-        "client_secret": "CSM8g0DV6FlIlBT3bEGk0DZ-onl6uaMnA7ecuhSHqM7gEOuQQW0eOun9MtBnXnPl",
+        "client_secret": "CSM8g0DV6FlIlBT3bEGk0DZ",
         "restaurant_guid": "8399afd6-fdb5-4a12-a0fb-d8ea317338d6",
         "api_hostname": "https://ws-api.toasttab.com"
     },
