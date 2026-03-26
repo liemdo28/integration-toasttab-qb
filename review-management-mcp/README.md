@@ -50,3 +50,12 @@ The following high-priority review points were validated and implemented:
 - DRY_RUN support added.
 - Google API client now includes timeout + retry/backoff for 429/5xx.
 - Notification script uses `dotenv` and HTML escaping.
+
+## Production-first rollout chosen
+- **Scheduler**: `scripts/run-daily.mjs` + OS scheduler (Task Scheduler on Windows, launchd on macOS).
+- **Yelp**: prioritize email ingestion first (safer/more stable than scraping).
+- **Secrets**: use `.env` locally and never commit secrets; rotate keys if previously exposed.
+
+See:
+- `docs/operations-playbook.md`
+- `docs/yelp-strategy.md`
