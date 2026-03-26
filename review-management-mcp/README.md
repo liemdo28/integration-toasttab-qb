@@ -38,3 +38,15 @@ The upstream repository could not be fetched in this environment (GitHub connect
 - Replace `generate_reply()` with your AI provider call.
 - Replace `post_reply()` with your official reply endpoint.
 
+
+## Applied fixes from technical review
+The following high-priority review points were validated and implemented:
+- Stable tracker path in `logs/response-history.json` (no `process.cwd()` drift).
+- Pending markdown now always appends/creates file.
+- `unanswered_only` checks both Google reply state and local tracker.
+- Idempotency key upgraded to `platform:location:reviewId`.
+- Posting now uses `reviewName` directly, avoiding full-list scan for a single review.
+- Startup env validation added.
+- DRY_RUN support added.
+- Google API client now includes timeout + retry/backoff for 429/5xx.
+- Notification script uses `dotenv` and HTML escaping.
