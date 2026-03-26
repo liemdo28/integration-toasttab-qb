@@ -1,0 +1,40 @@
+name: Weekly Review Automation
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 2 * * 1" # Every Monday 02:00 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  run-weekly-review-automation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      REVIEW_SOURCE_ID: ${{ secrets.REVIEW_SOURCE_ID }}
+      REPLY_MODE: ${{ vars.REPLY_MODE || 'manual' }}
+      AUTO_POST_MAX_RISK: ${{ vars.AUTO_POST_MAX_RISK || 'low' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run review automation
+        run: |
+          python review-management-mcp/scripts/review_management_runner.py
+
+      - name: Upload report artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: review-run-report
+          path: artifacts/review_run_report.json
+          if-no-files-found: error
