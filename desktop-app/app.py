@@ -12,6 +12,7 @@ No API required - all data comes from Toast website scraping + local Excel files
 import argparse
 import sys
 import os
+import csv
 import json
 import time
 import threading
@@ -39,6 +40,7 @@ LOCAL_CONFIG_FILE = runtime_path("local-config.json")
 REPORTS_DIR = runtime_path("toast-reports")
 AUDIT_LOG_DIR = runtime_path("audit-logs")
 DELETE_AUDIT_DIR = AUDIT_LOG_DIR / "delete-transactions"
+QBSYNC_ISSUE_DIR = AUDIT_LOG_DIR / "qb-sync-validation"
 
 # Toast locations (for download tab)
 TOAST_LOCATIONS = ["Stockton", "The Rim", "Stone Oak", "Bandera", "WA1", "WA2", "WA3"]
@@ -391,6 +393,7 @@ class QBSyncTab(ctk.CTkFrame):
         self.status_var = status_var
         self._running = False
         self._global_cfg, self._stores = load_mapping()
+        self.validation_records = []
         self._build_ui()
 
     def _build_ui(self):
@@ -490,6 +493,27 @@ class QBSyncTab(ctk.CTkFrame):
         self.progress_label = ctk.CTkLabel(self, text="Ready", text_color="gray")
         self.progress_label.pack(anchor="w", padx=15)
 
+        # ── Validation Issues ──
+        issue_frame = ctk.CTkFrame(self)
+        issue_frame.pack(fill="x", padx=15, pady=(5, 5))
+        issue_header = ctk.CTkFrame(issue_frame, fg_color="transparent")
+        issue_header.pack(fill="x", padx=10, pady=(10, 4))
+        ctk.CTkLabel(issue_header, text="Validation Issues", font=ctk.CTkFont(size=13, weight="bold")).pack(side="left")
+        self.validation_summary = ctk.CTkLabel(issue_header, text="No validation issues yet", text_color="gray")
+        self.validation_summary.pack(side="left", padx=10)
+        self.export_issues_btn = ctk.CTkButton(
+            issue_header,
+            text="Export Issues",
+            width=110,
+            height=28,
+            command=self._export_validation_issues,
+            state="disabled",
+        )
+        self.export_issues_btn.pack(side="right")
+        self.validation_box = ctk.CTkTextbox(issue_frame, height=140, font=ctk.CTkFont(family="Consolas", size=11))
+        self.validation_box.pack(fill="x", padx=10, pady=(0, 10))
+        self.validation_box.configure(state="disabled")
+
         # ── Log ──
         self.log_box = make_log_box(self)
 
@@ -569,6 +593,7 @@ class QBSyncTab(ctk.CTkFrame):
             except ValueError:
                 messagebox.showerror("Error", f"Invalid date format: {d}\nUse YYYY-MM-DD")
                 return
+        self._set_validation_records([])
         self._running = True
         self.sync_btn.configure(state="disabled", text="Syncing...")
         threading.Thread(target=self._sync_worker,
@@ -579,8 +604,15 @@ class QBSyncTab(ctk.CTkFrame):
         try:
             global_cfg, all_stores = load_mapping()
             sys.path.insert(0, str(APP_DIR))
-            from qb_sync import (QBSyncClient, ToastExcelReader, extract_receipt_lines,
-                                 load_csv_mapping, find_report_file)
+            from qb_sync import (
+                QBSyncClient,
+                ToastExcelReader,
+                extract_receipt_lines,
+                has_blocking_issues,
+                load_csv_mapping,
+                find_report_file,
+                summarize_validation_issues,
+            )
 
             gdrive = None
             if source == "gdrive":
@@ -612,6 +644,7 @@ class QBSyncTab(ctk.CTkFrame):
             current_task = 0
             success_count = 0
             fail_count = 0
+            validation_records = []
 
             # Group by qbw_match
             from collections import OrderedDict
@@ -705,10 +738,20 @@ class QBSyncTab(ctk.CTkFrame):
                             if total_bal != 0:
                                 self.log("  Warning: Sales receipt lines are not balanced; verify mapping or over/short setup")
                             if issues:
+                                summary = summarize_validation_issues(issues)
+                                validation_records.append(
+                                    {
+                                        "store": display_name,
+                                        "date": date_str,
+                                        "report_path": filepath,
+                                        "summary": summary,
+                                        "issues": [issue.to_dict() for issue in issues],
+                                    }
+                                )
                                 self.log("  Validation issues found:")
                                 for issue in issues:
-                                    self.log(f"    [{issue['code']}] {issue['message']}")
-                            if strict_mode and issues:
+                                    self.log(f"    {issue.format_line()}")
+                            if strict_mode and has_blocking_issues(issues):
                                 self.log("  Strict mode blocked this sync because report validation issues were found")
                                 fail_count += 1
                                 try:
@@ -790,6 +833,7 @@ class QBSyncTab(ctk.CTkFrame):
                         pass
 
             self.update_progress(total_tasks, total_tasks, "Done")
+            self.after(0, lambda records=validation_records: self._set_validation_records(records))
             self.log(f"\nAll done! Success: {success_count}, Failed: {fail_count}")
 
         except Exception as e:
@@ -800,6 +844,72 @@ class QBSyncTab(ctk.CTkFrame):
             self._running = False
             self.after(0, lambda: self.sync_btn.configure(state="normal", text="Sync to QuickBooks"))
             self.after(0, lambda: self.status_var.set("Ready"))
+
+    def _set_validation_records(self, records):
+        self.validation_records = records
+        counts = {"error": 0, "warning": 0, "info": 0}
+        lines = []
+        for record in records:
+            summary = record.get("summary", {})
+            for key, value in summary.items():
+                counts[key] = counts.get(key, 0) + value
+            lines.append(f"{record['store']} | {record['date']} | {record['report_path']}")
+            for issue in record.get("issues", []):
+                severity = issue.get("severity", "warning").upper()
+                lines.append(f"  [{severity}] {issue['code']}: {issue['message']}")
+            lines.append("")
+
+        if records:
+            summary_parts = []
+            if counts.get("error"):
+                summary_parts.append(f"{counts['error']} error")
+            if counts.get("warning"):
+                summary_parts.append(f"{counts['warning']} warning")
+            if counts.get("info"):
+                summary_parts.append(f"{counts['info']} info")
+            summary_text = ", ".join(summary_parts) if summary_parts else "Issues captured"
+            summary_color = "#dc2626" if counts.get("error") else "#d97706"
+            self.validation_summary.configure(text=summary_text, text_color=summary_color)
+            self.export_issues_btn.configure(state="normal")
+        else:
+            self.validation_summary.configure(text="No validation issues yet", text_color="gray")
+            self.export_issues_btn.configure(state="disabled")
+
+        self.validation_box.configure(state="normal")
+        self.validation_box.delete("1.0", "end")
+        if lines:
+            self.validation_box.insert("end", "\n".join(lines).strip())
+        self.validation_box.configure(state="disabled")
+
+    def _export_validation_issues(self):
+        if not self.validation_records:
+            messagebox.showinfo("No Issues", "There are no validation issues to export.")
+            return
+
+        QBSYNC_ISSUE_DIR.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        json_path = QBSYNC_ISSUE_DIR / f"qb-sync-validation-{timestamp}.json"
+        csv_path = QBSYNC_ISSUE_DIR / f"qb-sync-validation-{timestamp}.csv"
+
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(self.validation_records, f, indent=2, ensure_ascii=False)
+
+        with open(csv_path, "w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=["store", "date", "report_path", "severity", "code", "message"])
+            writer.writeheader()
+            for record in self.validation_records:
+                for issue in record.get("issues", []):
+                    writer.writerow({
+                        "store": record["store"],
+                        "date": record["date"],
+                        "report_path": record["report_path"],
+                        "severity": issue.get("severity", "warning"),
+                        "code": issue["code"],
+                        "message": issue["message"],
+                    })
+
+        self.log(f"Validation issues exported -> {csv_path}")
+        messagebox.showinfo("Issues Exported", f"CSV: {csv_path}\nJSON: {json_path}")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1763,6 +1873,7 @@ def main(argv=None):
 
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     AUDIT_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    QBSYNC_ISSUE_DIR.mkdir(parents=True, exist_ok=True)
     if args.doctor_cli:
         return run_cli_doctor()
 

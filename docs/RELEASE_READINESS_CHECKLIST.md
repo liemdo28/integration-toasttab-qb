@@ -55,7 +55,7 @@ Chua hoan tat:
   - [ ] malformed workbook / missing sheet
 - [ ] Hoan thien packaging
   - [ ] icon / version metadata
-  - [ ] installer
+  - [x] installer script + CI installer artifact
   - [ ] release note/checklist
   - [ ] huong dan update cho user noi bo
 

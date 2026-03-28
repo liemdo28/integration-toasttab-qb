@@ -4,6 +4,7 @@ from pathlib import Path
 import openpyxl
 
 import qb_sync
+from qb_sync import ValidationIssue
 
 
 def _write_sheet(workbook, title, rows, total_row=None):
@@ -224,3 +225,26 @@ def test_unmapped_payment_subtype_reports_issue(tmp_path):
     )
 
     assert any(issue["code"] == "unmapped_payment_subtype" for issue in issues)
+
+
+def test_validation_issue_has_severity_and_blocking_metadata(tmp_path):
+    report_path = tmp_path / "SalesSummary_2026-03-30_2026-03-30.xlsx"
+    _build_report(
+        report_path,
+        revenue={"Tax amount": 0, "Tips": 0, "Gratuity": 0, "Deferred (gift cards)": 0},
+        net_sales={"Sales discounts": 0, "Sales refunds": 0},
+        categories=[{"Sales category": "Unknown", "Net sales": 10, "Gross sales": 10}],
+        payments=[{"Payment type": "Cash", "Payment sub type": "", "Total": 10}],
+    )
+
+    issues = []
+    reader = qb_sync.ToastExcelReader(report_path)
+    qb_sync.extract_receipt_lines(
+        reader,
+        {"sales_category_map": {}, "payment_map": {"Cash": "Cash Drawer"}},
+        issues=issues,
+    )
+
+    assert isinstance(issues[0], ValidationIssue)
+    assert issues[0].severity == "error"
+    assert issues[0].blocking is True

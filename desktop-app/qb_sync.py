@@ -9,6 +9,7 @@ import os
 import sys
 import time
 import xml.etree.ElementTree as ET
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
@@ -179,6 +180,70 @@ def escape_xml(text):
     )
 
 
+ISSUE_SEVERITY = {
+    "unmapped_categories": ("error", True),
+    "unmapped_tax": ("error", True),
+    "unmapped_payment_subtype": ("error", True),
+    "unmapped_other_payment": ("error", True),
+    "unmapped_payment_type": ("error", True),
+    "unbalanced_receipt": ("error", True),
+}
+
+
+@dataclass
+class ValidationIssue:
+    code: str
+    message: str
+    severity: str = "warning"
+    blocking: bool = False
+    meta: dict = field(default_factory=dict)
+
+    def __getitem__(self, key):
+        if key == "code":
+            return self.code
+        if key == "message":
+            return self.message
+        if key == "severity":
+            return self.severity
+        if key == "blocking":
+            return self.blocking
+        return self.meta[key]
+
+    def get(self, key, default=None):
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def to_dict(self):
+        return {
+            "code": self.code,
+            "message": self.message,
+            "severity": self.severity,
+            "blocking": self.blocking,
+            **self.meta,
+        }
+
+    def format_line(self):
+        level = self.severity.upper()
+        return f"[{level}] {self.code}: {self.message}"
+
+
+def _issue_defaults(code):
+    return ISSUE_SEVERITY.get(code, ("warning", False))
+
+
+def summarize_validation_issues(issues):
+    counts = {"error": 0, "warning": 0, "info": 0}
+    for issue in issues:
+        counts[issue.severity] = counts.get(issue.severity, 0) + 1
+    return counts
+
+
+def has_blocking_issues(issues):
+    return any(issue.blocking for issue in issues)
+
+
 # ── Excel Reader ─────────────────────────────────────────────────────
 class ToastExcelReader:
     """Read Toast SalesSummary Excel file and extract data."""
@@ -259,7 +324,16 @@ def extract_receipt_lines(reader, store_config, issues=None):
     issues = issues if issues is not None else []
 
     def add_issue(code, message, **meta):
-        issues.append({"code": code, "message": message, **meta})
+        severity, blocking = _issue_defaults(code)
+        issues.append(
+            ValidationIssue(
+                code=code,
+                message=message,
+                severity=severity,
+                blocking=blocking,
+                meta=meta,
+            )
+        )
 
     lines = []
     cat_map = store_config.get("sales_category_map", {})

@@ -48,6 +48,17 @@ jobs:
       - name: Run diagnostics smoke check
         run: python desktop-app/app.py --doctor-cli
 
-      - name: Build desktop app smoke test
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Build desktop release pipeline
         working-directory: desktop-app
-        run: pyinstaller ToastPOSManager.spec --noconfirm
+        run: powershell -ExecutionPolicy Bypass -File .\build_release.ps1
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: toast-pos-manager-release
+          path: |
+            desktop-app/release/*.zip
+            desktop-app/release/*Setup*.exe

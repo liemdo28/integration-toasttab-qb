@@ -8,7 +8,7 @@ Tai lieu nay thay the cach noi "5000 tester test app" bang mot chuong trinh regr
 - `pytest` cho delete policy
 - `py_compile` cho cac module chinh
 - `doctor-cli` smoke check cho environment diagnostics
-- GitHub Actions Windows CI de chay test + build smoke tren moi push/PR
+- GitHub Actions Windows CI de chay test + build release pipeline tren moi push/PR, gom ca release zip va installer artifact
 
 ## Coverage groups
 
