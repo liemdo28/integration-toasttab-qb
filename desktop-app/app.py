@@ -80,6 +80,11 @@ def save_local_config(config):
         json.dump(config, f, indent=2, ensure_ascii=False)
 
 
+def get_marketplace_paths(config: dict | None, store_name: str) -> dict[str, str]:
+    config = config or {}
+    return dict(((config.get("marketplace_paths") or {}).get(store_name) or {}))
+
+
 # ── Shared UI helpers ────────────────────────────────────────────────
 def make_log_box(parent, height=200):
     """Create a consistent log textbox."""
@@ -413,6 +418,9 @@ class QBSyncTab(ctk.CTkFrame):
         self.selected_mapping_candidate = None
         self.pending_force_reruns = {}
         self.last_sync_run = None
+        self.marketplace_path_vars = {}
+        self.marketplace_status_labels = {}
+        self.marketplace_source_meta = []
         self._build_ui()
 
     def _build_ui(self):
@@ -497,6 +505,87 @@ class QBSyncTab(ctk.CTkFrame):
             text="Strict accounting mode (block sync on unmapped or unbalanced report data)",
             variable=self.strict_sync_var,
         ).grid(row=2, column=0, columnspan=3, pady=(8, 0), sticky="w")
+
+        # ── Marketplace Uploads ──
+        marketplace_frame = ctk.CTkFrame(self)
+        marketplace_frame.pack(fill="x", padx=15, pady=5)
+        marketplace_header = ctk.CTkFrame(marketplace_frame, fg_color="transparent")
+        marketplace_header.pack(fill="x", padx=10, pady=(10, 4))
+        ctk.CTkLabel(
+            marketplace_header,
+            text="Marketplace Uploads",
+            font=ctk.CTkFont(size=13, weight="bold"),
+        ).pack(side="left")
+        self.marketplace_summary = ctk.CTkLabel(
+            marketplace_header,
+            text="Toasttab still downloads from the website. Marketplace CSVs are user-selected files.",
+            text_color="gray",
+        )
+        self.marketplace_summary.pack(side="left", padx=10)
+
+        marketplace_btn_row = ctk.CTkFrame(marketplace_frame, fg_color="transparent")
+        marketplace_btn_row.pack(fill="x", padx=10, pady=(0, 4))
+        ctk.CTkButton(
+            marketplace_btn_row,
+            text="Refresh File Status",
+            width=130,
+            command=self._refresh_marketplace_source_statuses,
+        ).pack(side="left", padx=2)
+        ctk.CTkButton(
+            marketplace_btn_row,
+            text="Open Upload Folder",
+            width=130,
+            command=self._open_marketplace_upload_folder,
+        ).pack(side="left", padx=2)
+
+        marketplace_grid = ctk.CTkFrame(marketplace_frame, fg_color="transparent")
+        marketplace_grid.pack(fill="x", padx=10, pady=(0, 8))
+        ctk.CTkLabel(marketplace_grid, text="Store", font=ctk.CTkFont(size=12, weight="bold")).grid(row=0, column=0, sticky="w", padx=(0, 6))
+        ctk.CTkLabel(marketplace_grid, text="Source", font=ctk.CTkFont(size=12, weight="bold")).grid(row=0, column=1, sticky="w", padx=(0, 6))
+        ctk.CTkLabel(marketplace_grid, text="Uploaded CSV", font=ctk.CTkFont(size=12, weight="bold")).grid(row=0, column=2, sticky="w", padx=(0, 6))
+        ctk.CTkLabel(marketplace_grid, text="Status", font=ctk.CTkFont(size=12, weight="bold")).grid(row=0, column=5, sticky="w", padx=(6, 0))
+
+        row_index = 1
+        marketplace_paths = self._local_cfg.get("marketplace_paths", {})
+        for store_name, store_cfg in self._stores.items():
+            for source_cfg in store_cfg.get("additional_sale_receipts", []):
+                source_name = source_cfg.get("name", "")
+                path_var = ctk.StringVar(value=((marketplace_paths.get(store_name) or {}).get(source_name, "")))
+                key = (store_name, source_name)
+                self.marketplace_path_vars[key] = path_var
+                self.marketplace_source_meta.append(
+                    {
+                        "store": store_name,
+                        "source": source_name,
+                        "file_name": source_cfg.get("file_name", ""),
+                    }
+                )
+                ctk.CTkLabel(marketplace_grid, text=store_name, anchor="w", width=95).grid(row=row_index, column=0, sticky="w", padx=(0, 6), pady=3)
+                ctk.CTkLabel(marketplace_grid, text=source_name, anchor="w", width=90).grid(row=row_index, column=1, sticky="w", padx=(0, 6), pady=3)
+                ctk.CTkEntry(
+                    marketplace_grid,
+                    textvariable=path_var,
+                    width=360,
+                    placeholder_text=f"Select uploaded {source_cfg.get('file_name', 'CSV file')}",
+                ).grid(row=row_index, column=2, sticky="ew", padx=(0, 6), pady=3)
+                ctk.CTkButton(
+                    marketplace_grid,
+                    text="Browse",
+                    width=70,
+                    command=lambda s=store_name, src=source_name, fn=source_cfg.get("file_name", ""): self._browse_marketplace_file(s, src, fn),
+                ).grid(row=row_index, column=3, padx=2, pady=3)
+                ctk.CTkButton(
+                    marketplace_grid,
+                    text="Clear",
+                    width=60,
+                    command=lambda s=store_name, src=source_name: self._clear_marketplace_file(s, src),
+                ).grid(row=row_index, column=4, padx=2, pady=3)
+                status_label = ctk.CTkLabel(marketplace_grid, text="No file selected", text_color="gray", anchor="w")
+                status_label.grid(row=row_index, column=5, sticky="w", padx=(6, 0), pady=3)
+                self.marketplace_status_labels[key] = status_label
+                row_index += 1
+
+        marketplace_grid.columnconfigure(2, weight=1)
 
         # ── Action Button ──
         self.sync_btn = ctk.CTkButton(self, text="Sync to QuickBooks",
@@ -611,9 +700,14 @@ class QBSyncTab(ctk.CTkFrame):
         self.last_sync_box.pack(fill="x", padx=10, pady=(0, 10))
         self.last_sync_box.configure(state="disabled")
 
+        self.source_sync_box = ctk.CTkTextbox(status_frame, height=120, font=ctk.CTkFont(family="Consolas", size=11))
+        self.source_sync_box.pack(fill="x", padx=10, pady=(0, 10))
+        self.source_sync_box.configure(state="disabled")
+
         # ── Log ──
         self.log_box = make_log_box(self)
         self._refresh_mapping_candidates()
+        self._refresh_marketplace_source_statuses()
         self._refresh_last_sync_status()
 
     def _browse_qbw(self, store_name):
@@ -661,6 +755,77 @@ class QBSyncTab(ctk.CTkFrame):
                 paths[name] = val
         self._local_cfg["qbw_paths"] = paths
         save_local_config(self._local_cfg)
+
+    def _get_marketplace_uploaded_paths(self, store_name):
+        return get_marketplace_paths(self._local_cfg, store_name)
+
+    def _save_marketplace_paths(self):
+        marketplace_paths = {}
+        for (store_name, source_name), var in self.marketplace_path_vars.items():
+            value = var.get().strip()
+            if value:
+                marketplace_paths.setdefault(store_name, {})[source_name] = value
+        self._local_cfg["marketplace_paths"] = marketplace_paths
+        save_local_config(self._local_cfg)
+
+    def _browse_marketplace_file(self, store_name, source_name, suggested_name):
+        initial_dir = self._local_cfg.get("last_marketplace_dir") or str(Path.home() / "Downloads")
+        filepath = filedialog.askopenfilename(
+            title=f"Select {source_name} CSV for {store_name}",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+            initialdir=initial_dir,
+            initialfile=suggested_name or "",
+        )
+        if not filepath:
+            return
+        filepath = filepath.replace("/", "\\")
+        self.marketplace_path_vars[(store_name, source_name)].set(filepath)
+        self._local_cfg["last_marketplace_dir"] = str(Path(filepath).parent)
+        self._save_marketplace_paths()
+        self._refresh_marketplace_source_statuses()
+
+    def _clear_marketplace_file(self, store_name, source_name):
+        self.marketplace_path_vars[(store_name, source_name)].set("")
+        self._save_marketplace_paths()
+        self._refresh_marketplace_source_statuses()
+
+    def _open_marketplace_upload_folder(self):
+        folder = runtime_path("marketplace-reports")
+        folder.mkdir(parents=True, exist_ok=True)
+        os.startfile(str(folder))
+
+    def _refresh_marketplace_source_statuses(self):
+        selected = 0
+        for meta in self.marketplace_source_meta:
+            key = (meta["store"], meta["source"])
+            path_text = self.marketplace_path_vars[key].get().strip()
+            label = self.marketplace_status_labels[key]
+            if path_text:
+                path = Path(path_text)
+                if path.exists():
+                    label.configure(text=f"Ready: {path.name}", text_color="#059669")
+                    selected += 1
+                else:
+                    label.configure(text="Missing file", text_color="#dc2626")
+            else:
+                label.configure(text="No file selected", text_color="gray")
+        total = len(self.marketplace_source_meta)
+        if total:
+            self.marketplace_summary.configure(
+                text=f"Toasttab downloads from Toast website. Marketplace CSVs are user-selected files. {selected}/{total} source file(s) ready.",
+                text_color="gray" if selected < total else "#059669",
+            )
+        else:
+            self.marketplace_summary.configure(text="No additional marketplace receipts configured for current stores.", text_color="gray")
+
+    def _get_primary_source_name(self, store_cfg):
+        return (store_cfg.get("customer_name") or "Toasttab").strip() or "Toasttab"
+
+    def _expected_source_names_for_store(self, store_name):
+        store_cfg = self._stores.get(store_name, {})
+        names = [self._get_primary_source_name(store_cfg)]
+        names.extend(item.get("name", "") for item in store_cfg.get("additional_sale_receipts", []) if item.get("name"))
+        return names
 
     def log(self, msg):
         self.after(0, lambda: append_log(self.log_box, msg))
@@ -742,8 +907,18 @@ class QBSyncTab(ctk.CTkFrame):
                     expanded_stores.append((store_name, store_name, cfg))
 
             total_tasks = 0
-            for _, _, cfg in expanded_stores:
-                total_tasks += len(dates) * (1 + len(get_marketplace_sources_for_store(cfg, map_dir=app_path("Map"))))
+            for _, orig_name, cfg in expanded_stores:
+                total_tasks += len(dates) * (
+                    1
+                    + len(
+                        get_marketplace_sources_for_store(
+                            cfg,
+                            map_dir=app_path("Map"),
+                            uploaded_paths=self._get_marketplace_uploaded_paths(orig_name),
+                            require_uploaded_path=True,
+                        )
+                    )
+                )
             current_task = 0
             success_count = 0
             fail_count = 0
@@ -844,6 +1019,7 @@ class QBSyncTab(ctk.CTkFrame):
                                 fail_count += 1
                                 continue
 
+                            primary_source_name = self._get_primary_source_name(store_cfg)
                             validation = validate_toast_report_file(filepath)
                             if not validation.ok:
                                 self.log("  Report file validation failed before sync:")
@@ -855,6 +1031,7 @@ class QBSyncTab(ctk.CTkFrame):
                                     {
                                         "store": display_name,
                                         "date": date_str,
+                                        "source": primary_source_name,
                                         "report_path": filepath,
                                         "summary": {"error": len(validation.errors), "warning": len(validation.warnings), "info": 0},
                                         "issues": [
@@ -904,6 +1081,7 @@ class QBSyncTab(ctk.CTkFrame):
                                     {
                                         "store": display_name,
                                         "date": date_str,
+                                        "source": primary_source_name,
                                         "report_path": filepath,
                                         "summary": summary,
                                         "issues": [issue.to_dict() for issue in issues],
@@ -917,6 +1095,7 @@ class QBSyncTab(ctk.CTkFrame):
                                 ledger.record_blocked_validation(
                                     store=display_name,
                                     date=date_str,
+                                    source_name=primary_source_name,
                                     report_path=filepath,
                                     report_hash=report_identity.report_hash,
                                     report_size=report_identity.report_size,
@@ -948,6 +1127,7 @@ class QBSyncTab(ctk.CTkFrame):
                             begin_result = ledger.begin_run(
                                 store=display_name,
                                 date=date_str,
+                                source_name=primary_source_name,
                                 report_path=filepath,
                                 report_hash=report_identity.report_hash,
                                 report_size=report_identity.report_size,
@@ -969,6 +1149,7 @@ class QBSyncTab(ctk.CTkFrame):
                                     {
                                         "store": display_name,
                                         "date": date_str,
+                                        "source": primary_source_name,
                                         "report_path": filepath,
                                         "summary": {"error": 1, "warning": 0, "info": 0},
                                         "issues": [
@@ -1133,7 +1314,17 @@ class QBSyncTab(ctk.CTkFrame):
         from sync_ledger import STATUS_BLOCKED_DUPLICATE, build_report_identity
         from qb_sync import QBSyncClient
 
-        sources = get_marketplace_sources_for_store(store_cfg, map_dir=app_path("Map"))
+        uploaded_paths = self._get_marketplace_uploaded_paths(orig_name)
+        for raw_source in store_cfg.get("additional_sale_receipts", []):
+            if not uploaded_paths.get(raw_source.get("name", "")):
+                self.log(f"  No uploaded {raw_source.get('name', 'marketplace')} file selected for {orig_name}; skipping")
+
+        sources = get_marketplace_sources_for_store(
+            store_cfg,
+            map_dir=app_path("Map"),
+            uploaded_paths=uploaded_paths,
+            require_uploaded_path=True,
+        )
         success_count = 0
         fail_count = 0
         validation_records = []
@@ -1186,6 +1377,7 @@ class QBSyncTab(ctk.CTkFrame):
                     ledger.record_blocked_validation(
                         store=display_name,
                         date=date_str,
+                        source_name=source.name,
                         report_path=report_path,
                         report_hash=report_identity.report_hash,
                         report_size=report_identity.report_size,
@@ -1209,6 +1401,7 @@ class QBSyncTab(ctk.CTkFrame):
                 begin_result = ledger.begin_run(
                     store=display_name,
                     date=date_str,
+                    source_name=source.name,
                     report_path=report_path,
                     report_hash=report_identity.report_hash,
                     report_size=report_identity.report_size,
@@ -1325,6 +1518,7 @@ class QBSyncTab(ctk.CTkFrame):
             self.last_sync_summary.configure(text=message or "No sync history for current selection", text_color="gray")
             self.last_sync_box.insert("end", message or "Select one store and one date, then click Refresh Status.")
             self.last_sync_box.configure(state="disabled")
+            self._set_source_sync_statuses([], message or "No source-level sync history available.")
             self.export_sync_audit_btn.configure(state="disabled")
             self.mark_stale_btn.configure(state="disabled")
             self.force_rerun_btn.configure(state="disabled")
@@ -1341,6 +1535,7 @@ class QBSyncTab(ctk.CTkFrame):
         lines = [
             f"Store: {run.get('store')}",
             f"Date: {run.get('date')}",
+            f"Source: {run.get('source_name') or '-'}",
             f"Status: {status}",
             f"Started: {run.get('started_at') or '-'}",
             f"Finished: {run.get('finished_at') or '-'}",
@@ -1362,6 +1557,59 @@ class QBSyncTab(ctk.CTkFrame):
             state="normal" if status in {"blocked_duplicate", "failed", "blocked_validation", "success"} else "disabled"
         )
 
+    def _set_source_sync_statuses(self, runs, message=None):
+        self.source_sync_box.configure(state="normal")
+        self.source_sync_box.delete("1.0", "end")
+        if not runs:
+            self.source_sync_box.insert("end", message or "No source-level sync history yet.")
+            self.source_sync_box.configure(state="disabled")
+            return
+
+        lines = []
+        for run in runs:
+            status = run.get("status", "unknown")
+            lines.extend(
+                [
+                    f"{run.get('source_name') or 'Unknown'} | {status}",
+                    f"  Ref: {run.get('ref_number') or '-'}",
+                    f"  Report: {Path(run.get('report_path') or '-').name if run.get('report_path') else '-'}",
+                    f"  Finished: {run.get('finished_at') or run.get('started_at') or '-'}",
+                    f"  Error: {run.get('error_message') or '-'}",
+                    "",
+                ]
+            )
+        self.source_sync_box.insert("end", "\n".join(lines).strip())
+        self.source_sync_box.configure(state="disabled")
+
+    def _refresh_source_sync_statuses(self, store, date):
+        try:
+            from sync_ledger import SyncLedger
+
+            ledger = SyncLedger()
+            latest_by_source = {run.get("source_name") or "Unknown": run for run in ledger.get_latest_runs_by_source(store, date)}
+        except Exception as exc:
+            self._set_source_sync_statuses([], f"Could not load source-level status: {exc}")
+            return
+
+        ordered_runs = []
+        for source_name in self._expected_source_names_for_store(store):
+            if source_name in latest_by_source:
+                ordered_runs.append(latest_by_source.pop(source_name))
+            else:
+                ordered_runs.append(
+                    {
+                        "source_name": source_name,
+                        "status": "not_run",
+                        "ref_number": "",
+                        "report_path": "",
+                        "finished_at": "",
+                        "started_at": "",
+                        "error_message": "No run recorded for this source/date yet.",
+                    }
+                )
+        ordered_runs.extend(latest_by_source.values())
+        self._set_source_sync_statuses(ordered_runs)
+
     def _refresh_last_sync_status(self):
         store, date = self._status_target()
         if not store or not date:
@@ -1373,6 +1621,7 @@ class QBSyncTab(ctk.CTkFrame):
             ledger = SyncLedger()
             run = ledger.get_last_run(store, date)
             self._set_last_sync_status(run)
+            self._refresh_source_sync_statuses(store, date)
         except Exception as exc:
             self._set_last_sync_status(None, f"Could not load sync status: {exc}")
 
@@ -1577,7 +1826,8 @@ class QBSyncTab(ctk.CTkFrame):
             summary = record.get("summary", {})
             for key, value in summary.items():
                 counts[key] = counts.get(key, 0) + value
-            lines.append(f"{record['store']} | {record['date']} | {record['report_path']}")
+            source_label = record.get("source") or "Primary"
+            lines.append(f"{record['store']} | {record['date']} | {source_label} | {record['report_path']}")
             for issue in record.get("issues", []):
                 severity = issue.get("severity", "warning").upper()
                 lines.append(f"  [{severity}] {issue['code']}: {issue['message']}")
@@ -1620,13 +1870,14 @@ class QBSyncTab(ctk.CTkFrame):
             json.dump(self.validation_records, f, indent=2, ensure_ascii=False)
 
         with open(csv_path, "w", encoding="utf-8", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=["store", "date", "report_path", "severity", "code", "message"])
+            writer = csv.DictWriter(f, fieldnames=["store", "date", "source", "report_path", "severity", "code", "message"])
             writer.writeheader()
             for record in self.validation_records:
                 for issue in record.get("issues", []):
                     writer.writerow({
                         "store": record["store"],
                         "date": record["date"],
+                        "source": record.get("source", "Primary"),
                         "report_path": record["report_path"],
                         "severity": issue.get("severity", "warning"),
                         "code": issue["code"],

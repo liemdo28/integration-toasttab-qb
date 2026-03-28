@@ -20,6 +20,7 @@ class MarketplaceSource:
     csv_map: str
     file_name: str
     report_path: Path
+    selected_by_user: bool = False
 
 
 def d(value):
@@ -42,7 +43,22 @@ def default_marketplace_search_dirs() -> list[Path]:
     ]
 
 
-def resolve_marketplace_report_path(file_name: str, search_dirs: list[str | Path] | None = None) -> Path | None:
+def resolve_marketplace_report_path(
+    file_name: str,
+    search_dirs: list[str | Path] | None = None,
+    *,
+    explicit_path: str | Path | None = None,
+    require_explicit: bool = False,
+) -> Path | None:
+    if explicit_path:
+        explicit = Path(explicit_path)
+        if explicit.exists():
+            return explicit
+        if require_explicit:
+            return None
+    elif require_explicit:
+        return None
+
     candidates = []
     for base in search_dirs or default_marketplace_search_dirs():
         base_path = Path(base)
@@ -53,11 +69,24 @@ def resolve_marketplace_report_path(file_name: str, search_dirs: list[str | Path
     return None
 
 
-def get_marketplace_sources_for_store(store_config: dict, *, map_dir: str | Path, search_dirs: list[str | Path] | None = None) -> list[MarketplaceSource]:
+def get_marketplace_sources_for_store(
+    store_config: dict,
+    *,
+    map_dir: str | Path,
+    search_dirs: list[str | Path] | None = None,
+    uploaded_paths: dict[str, str] | None = None,
+    require_uploaded_path: bool = False,
+) -> list[MarketplaceSource]:
     sources = []
     for raw in store_config.get("additional_sale_receipts", []):
         map_path = Path(map_dir) / raw.get("csv_map", "")
-        report_path = resolve_marketplace_report_path(raw.get("file_name", ""), search_dirs=search_dirs)
+        explicit_path = (uploaded_paths or {}).get(raw.get("name", "")) or raw.get("report_path", "")
+        report_path = resolve_marketplace_report_path(
+            raw.get("file_name", ""),
+            search_dirs=search_dirs,
+            explicit_path=explicit_path,
+            require_explicit=require_uploaded_path,
+        )
         if not map_path.exists() or not report_path:
             continue
         sources.append(
@@ -68,6 +97,7 @@ def get_marketplace_sources_for_store(store_config: dict, *, map_dir: str | Path
                 csv_map=raw.get("csv_map", ""),
                 file_name=raw.get("file_name", ""),
                 report_path=report_path,
+                selected_by_user=bool(explicit_path),
             )
         )
     return sources

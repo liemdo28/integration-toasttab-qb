@@ -75,6 +75,7 @@ class SyncLedger:
                     sync_id TEXT PRIMARY KEY,
                     store TEXT NOT NULL,
                     date TEXT NOT NULL,
+                    source_name TEXT NOT NULL DEFAULT '',
                     report_path TEXT NOT NULL,
                     report_hash TEXT NOT NULL,
                     report_size INTEGER NOT NULL,
@@ -93,6 +94,9 @@ class SyncLedger:
                 )
                 """
             )
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(sync_runs)").fetchall()}
+            if "source_name" not in columns:
+                conn.execute("ALTER TABLE sync_runs ADD COLUMN source_name TEXT NOT NULL DEFAULT ''")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS sync_events (
@@ -105,6 +109,7 @@ class SyncLedger:
                 """
             )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_sync_runs_store_date ON sync_runs(store, date)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_sync_runs_store_date_source ON sync_runs(store, date, source_name)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_sync_runs_status ON sync_runs(status)")
             conn.commit()
 
@@ -141,6 +146,7 @@ class SyncLedger:
         *,
         store: str,
         date: str,
+        source_name: str,
         report_path: str | Path,
         report_hash: str,
         report_size: int,
@@ -162,11 +168,11 @@ class SyncLedger:
             running = conn.execute(
                 """
                 SELECT sync_id FROM sync_runs
-                WHERE store = ? AND date = ? AND status = ?
+                WHERE store = ? AND date = ? AND source_name = ? AND status = ?
                 ORDER BY started_at DESC, rowid DESC
                 LIMIT 1
                 """,
-                (store, date, STATUS_RUNNING),
+                (store, date, source_name, STATUS_RUNNING),
             ).fetchone()
             if running:
                 self._insert_blocked(
@@ -174,6 +180,7 @@ class SyncLedger:
                     sync_id=sync_id,
                     store=store,
                     date=date,
+                    source_name=source_name,
                     report_path=str(report_path),
                     report_hash=report_hash,
                     report_size=report_size,
@@ -200,11 +207,11 @@ class SyncLedger:
                 existing_success = conn.execute(
                     """
                     SELECT sync_id FROM sync_runs
-                    WHERE store = ? AND date = ? AND report_hash = ? AND status = ?
+                    WHERE store = ? AND date = ? AND source_name = ? AND report_hash = ? AND status = ?
                     ORDER BY started_at DESC, rowid DESC
                     LIMIT 1
                     """,
-                    (store, date, report_hash, STATUS_SUCCESS),
+                    (store, date, source_name, report_hash, STATUS_SUCCESS),
                 ).fetchone()
                 if existing_success:
                     if not override_reason:
@@ -213,6 +220,7 @@ class SyncLedger:
                             sync_id=sync_id,
                             store=store,
                             date=date,
+                            source_name=source_name,
                             report_path=str(report_path),
                             report_hash=report_hash,
                             report_size=report_size,
@@ -240,11 +248,11 @@ class SyncLedger:
                 existing_other_success = conn.execute(
                     """
                     SELECT sync_id FROM sync_runs
-                    WHERE store = ? AND date = ? AND report_hash != ? AND status = ?
+                    WHERE store = ? AND date = ? AND source_name = ? AND report_hash != ? AND status = ?
                     ORDER BY started_at DESC, rowid DESC
                     LIMIT 1
                     """,
-                    (store, date, report_hash, STATUS_SUCCESS),
+                    (store, date, source_name, report_hash, STATUS_SUCCESS),
                 ).fetchone()
                 if existing_other_success:
                     start_message = "A different report version was previously synced for this store/date. Review carefully."
@@ -252,15 +260,16 @@ class SyncLedger:
             conn.execute(
                 """
                 INSERT INTO sync_runs(
-                    sync_id, store, date, report_path, report_hash, report_size, report_mtime,
+                    sync_id, store, date, source_name, report_path, report_hash, report_size, report_mtime,
                     ref_number, preview, strict_mode, qb_company_file, status,
                     validation_error_count, validation_warning_count, started_at, override_reason
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     sync_id,
                     store,
                     date,
+                    source_name,
                     str(report_path),
                     report_hash,
                     report_size,
@@ -305,6 +314,7 @@ class SyncLedger:
         sync_id: str,
         store: str,
         date: str,
+        source_name: str,
         report_path: str,
         report_hash: str,
         report_size: int,
@@ -322,15 +332,16 @@ class SyncLedger:
         conn.execute(
             """
             INSERT INTO sync_runs(
-                sync_id, store, date, report_path, report_hash, report_size, report_mtime,
+                sync_id, store, date, source_name, report_path, report_hash, report_size, report_mtime,
                 ref_number, preview, strict_mode, qb_company_file, status,
                 validation_error_count, validation_warning_count, started_at, finished_at, error_message
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 sync_id,
                 store,
                 date,
+                source_name,
                 report_path,
                 report_hash,
                 report_size,
@@ -380,6 +391,7 @@ class SyncLedger:
         *,
         store: str,
         date: str,
+        source_name: str,
         report_path: str | Path,
         report_hash: str,
         report_size: int,
@@ -399,6 +411,7 @@ class SyncLedger:
                 sync_id=sync_id,
                 store=store,
                 date=date,
+                source_name=source_name,
                 report_path=str(report_path),
                 report_hash=report_hash,
                 report_size=report_size,
@@ -415,18 +428,47 @@ class SyncLedger:
             conn.commit()
         return sync_id
 
-    def get_last_run(self, store: str, date: str):
+    def get_last_run(self, store: str, date: str, source_name: str | None = None):
         with self._connect() as conn:
-            row = conn.execute(
+            if source_name is None:
+                row = conn.execute(
+                    """
+                    SELECT * FROM sync_runs
+                    WHERE store = ? AND date = ?
+                    ORDER BY started_at DESC, rowid DESC
+                    LIMIT 1
+                    """,
+                    (store, date),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    """
+                    SELECT * FROM sync_runs
+                    WHERE store = ? AND date = ? AND source_name = ?
+                    ORDER BY started_at DESC, rowid DESC
+                    LIMIT 1
+                    """,
+                    (store, date, source_name),
+                ).fetchone()
+            return dict(row) if row else None
+
+    def get_latest_runs_by_source(self, store: str, date: str) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
                 """
                 SELECT * FROM sync_runs
                 WHERE store = ? AND date = ?
                 ORDER BY started_at DESC, rowid DESC
-                LIMIT 1
                 """,
                 (store, date),
-            ).fetchone()
-            return dict(row) if row else None
+            ).fetchall()
+        latest: dict[str, dict] = {}
+        for row in rows:
+            item = dict(row)
+            source_name = item.get("source_name") or "Unknown"
+            if source_name not in latest:
+                latest[source_name] = item
+        return list(latest.values())
 
     def get_run(self, sync_id: str):
         with self._connect() as conn:

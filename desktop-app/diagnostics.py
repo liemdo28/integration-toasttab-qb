@@ -225,6 +225,23 @@ def run_environment_checks(local_config: dict | None = None) -> DiagnosticReport
     else:
         _add(checks, "QB Company Files", "warning", "No .qbw paths saved yet")
 
+    marketplace_paths = (local_config or {}).get("marketplace_paths", {})
+    if marketplace_paths:
+        missing_marketplace = []
+        ready_count = 0
+        for store_name, sources in marketplace_paths.items():
+            for source_name, path in (sources or {}).items():
+                if Path(path).exists():
+                    ready_count += 1
+                else:
+                    missing_marketplace.append(f"{store_name}/{source_name}: {path}")
+        if missing_marketplace:
+            _add(checks, "Marketplace Uploads", "warning", "Missing uploaded file(s) -> " + "; ".join(missing_marketplace))
+        elif ready_count:
+            _add(checks, "Marketplace Uploads", "ok", f"{ready_count} uploaded marketplace file(s) look valid")
+    else:
+        _add(checks, "Marketplace Uploads", "warning", "No uploaded marketplace CSV paths saved yet")
+
     delete_policy = load_delete_policy(local_config, env_values)
     if delete_policy.allow_live_delete:
         _add(checks, "Delete Policy", "warning", f"Live delete enabled via {delete_policy.source}")

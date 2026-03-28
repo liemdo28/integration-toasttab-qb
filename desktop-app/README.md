@@ -102,7 +102,7 @@ Neu may build co Inno Setup (`ISCC.exe`), script se build them installer `.exe` 
 - Tab `QB Sync` gio co `Last Sync Status` de operator xem run gan nhat, export sync audit, mark stale run as failed, va arm `Force Re-run` voi ly do luu vao ledger
 - Tab `QB Sync` gio co `Mapping Maintenance` de operator sua map category/tax/payment ngay trong app, luu vao CSV map, roi re-run preview ma khong can dev sua file thu cong
 - Mapping Maintenance gio co nut `Save + Re-run Preview` de save map xong thi app tu chon dung store/date va chay preview lai ngay
-- Stockton/Raw gio co them 3 receipt bo sung theo customer rieng neu tim thay file `UberSale.csv`, `DoordashSale.csv`, `GrubhubSale.csv` trong `Downloads` hoac `marketplace-reports`; Toasttab van la receipt chinh
+- Stockton/Raw gio co them 3 receipt bo sung theo customer rieng cho `Uber`, `DoorDash`, `Grubhub`; Toasttab van la receipt chinh va duoc download bang giao dien Toast website, con 3 CSV marketplace duoc operator chon thu cong trong tab `QB Sync`
 
 ## Release planning
 

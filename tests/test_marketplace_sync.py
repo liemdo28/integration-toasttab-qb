@@ -116,3 +116,47 @@ def test_get_marketplace_sources_for_store_resolves_existing_reports(tmp_path):
     assert len(sources) == 1
     assert sources[0].customer_name == "Uber"
     assert Path(sources[0].report_path).name == "UberSale.csv"
+
+
+def test_get_marketplace_sources_for_store_requires_uploaded_path_when_requested(tmp_path):
+    map_dir = tmp_path / "Map"
+    downloads = tmp_path / "Downloads"
+    uploaded = tmp_path / "Uploaded"
+    map_dir.mkdir()
+    downloads.mkdir()
+    uploaded.mkdir()
+    (map_dir / "uber_raw.csv").write_text("QB,Column,Type\n", encoding="utf-8")
+    (downloads / "UberSale.csv").write_text("Row Labels\n", encoding="utf-8")
+    uploaded_file = uploaded / "Raw-Uber-2026-03-28.csv"
+    uploaded_file.write_text("Row Labels\n", encoding="utf-8")
+
+    store_config = {
+        "additional_sale_receipts": [
+            {
+                "name": "Uber",
+                "customer_name": "Uber",
+                "ref_prefix": "UE",
+                "file_name": "UberSale.csv",
+                "csv_map": "uber_raw.csv",
+            }
+        ]
+    }
+
+    assert get_marketplace_sources_for_store(
+        store_config,
+        map_dir=map_dir,
+        search_dirs=[downloads],
+        require_uploaded_path=True,
+    ) == []
+
+    sources = get_marketplace_sources_for_store(
+        store_config,
+        map_dir=map_dir,
+        search_dirs=[downloads],
+        uploaded_paths={"Uber": str(uploaded_file)},
+        require_uploaded_path=True,
+    )
+
+    assert len(sources) == 1
+    assert Path(sources[0].report_path) == uploaded_file
+    assert sources[0].selected_by_user is True
