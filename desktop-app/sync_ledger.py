@@ -12,6 +12,7 @@ from report_validator import compute_sha256
 
 
 LEDGER_DB_PATH = runtime_path("sync-ledger.db")
+SYNC_AUDIT_DIR = runtime_path("audit-logs", "sync-runs")
 
 
 STATUS_RUNNING = "running"
@@ -55,8 +56,9 @@ def build_report_identity(report_path: str | Path) -> ReportIdentity:
 
 
 class SyncLedger:
-    def __init__(self, db_path: str | Path | None = None):
+    def __init__(self, db_path: str | Path | None = None, audit_dir: str | Path | None = None):
         self.db_path = Path(db_path or LEDGER_DB_PATH)
+        self.audit_dir = Path(audit_dir or SYNC_AUDIT_DIR)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
@@ -150,6 +152,7 @@ class SyncLedger:
         validation_error_count: int = 0,
         validation_warning_count: int = 0,
         stale_after_minutes: int = 30,
+        override_reason: str | None = None,
     ) -> BeginRunResult:
         self.mark_stale_runs_failed(stale_after_minutes=stale_after_minutes)
         sync_id = str(uuid.uuid4())
@@ -160,7 +163,7 @@ class SyncLedger:
                 """
                 SELECT sync_id FROM sync_runs
                 WHERE store = ? AND date = ? AND status = ?
-                ORDER BY started_at DESC
+                ORDER BY started_at DESC, rowid DESC
                 LIMIT 1
                 """,
                 (store, date, STATUS_RUNNING),
@@ -198,45 +201,47 @@ class SyncLedger:
                     """
                     SELECT sync_id FROM sync_runs
                     WHERE store = ? AND date = ? AND report_hash = ? AND status = ?
-                    ORDER BY started_at DESC
+                    ORDER BY started_at DESC, rowid DESC
                     LIMIT 1
                     """,
                     (store, date, report_hash, STATUS_SUCCESS),
                 ).fetchone()
                 if existing_success:
-                    self._insert_blocked(
-                        conn,
-                        sync_id=sync_id,
-                        store=store,
-                        date=date,
-                        report_path=str(report_path),
-                        report_hash=report_hash,
-                        report_size=report_size,
-                        report_mtime=report_mtime,
-                        ref_number=ref_number,
-                        preview=preview,
-                        strict_mode=strict_mode,
-                        qb_company_file=qb_company_file,
-                        status=STATUS_BLOCKED_DUPLICATE,
-                        error_message="This report was already synced successfully.",
-                        validation_error_count=validation_error_count,
-                        validation_warning_count=validation_warning_count,
-                    )
-                    conn.commit()
-                    return BeginRunResult(
-                        allowed=False,
-                        sync_id=sync_id,
-                        status=STATUS_BLOCKED_DUPLICATE,
-                        message="This report was already synced successfully.",
-                    existing_sync_id=existing_success["sync_id"],
-                )
+                    if not override_reason:
+                        self._insert_blocked(
+                            conn,
+                            sync_id=sync_id,
+                            store=store,
+                            date=date,
+                            report_path=str(report_path),
+                            report_hash=report_hash,
+                            report_size=report_size,
+                            report_mtime=report_mtime,
+                            ref_number=ref_number,
+                            preview=preview,
+                            strict_mode=strict_mode,
+                            qb_company_file=qb_company_file,
+                            status=STATUS_BLOCKED_DUPLICATE,
+                            error_message="This report was already synced successfully.",
+                            validation_error_count=validation_error_count,
+                            validation_warning_count=validation_warning_count,
+                        )
+                        conn.commit()
+                        return BeginRunResult(
+                            allowed=False,
+                            sync_id=sync_id,
+                            status=STATUS_BLOCKED_DUPLICATE,
+                            message="This report was already synced successfully.",
+                            existing_sync_id=existing_success["sync_id"],
+                        )
+                    start_message = "Override re-run requested for a report that was already synced successfully."
 
             if not preview:
                 existing_other_success = conn.execute(
                     """
                     SELECT sync_id FROM sync_runs
                     WHERE store = ? AND date = ? AND report_hash != ? AND status = ?
-                    ORDER BY started_at DESC
+                    ORDER BY started_at DESC, rowid DESC
                     LIMIT 1
                     """,
                     (store, date, report_hash, STATUS_SUCCESS),
@@ -249,8 +254,8 @@ class SyncLedger:
                 INSERT INTO sync_runs(
                     sync_id, store, date, report_path, report_hash, report_size, report_mtime,
                     ref_number, preview, strict_mode, qb_company_file, status,
-                    validation_error_count, validation_warning_count, started_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    validation_error_count, validation_warning_count, started_at, override_reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     sync_id,
@@ -268,12 +273,23 @@ class SyncLedger:
                     validation_error_count,
                     validation_warning_count,
                     utc_now(),
+                    override_reason or "",
                 ),
             )
             conn.execute(
                 "INSERT INTO sync_events(sync_id, event_type, event_time, payload_json) VALUES (?, ?, ?, ?)",
                 (sync_id, "run_started", utc_now(), json.dumps({}, ensure_ascii=False)),
             )
+            if override_reason:
+                conn.execute(
+                    "INSERT INTO sync_events(sync_id, event_type, event_time, payload_json) VALUES (?, ?, ?, ?)",
+                    (
+                        sync_id,
+                        "override_rerun_requested",
+                        utc_now(),
+                        json.dumps({"reason": override_reason}, ensure_ascii=False),
+                    ),
+                )
             conn.commit()
             return BeginRunResult(
                 allowed=True,
@@ -355,6 +371,10 @@ class SyncLedger:
     def mark_failed(self, sync_id: str, error_message: str):
         self.mark_status(sync_id, STATUS_FAILED, error_message=error_message)
 
+    def operator_mark_failed(self, sync_id: str, reason: str):
+        self.mark_status(sync_id, STATUS_FAILED, error_message=reason, payload={"reason": reason})
+        self.record_event(sync_id, "operator_mark_failed", {"reason": reason})
+
     def record_blocked_validation(
         self,
         *,
@@ -401,12 +421,53 @@ class SyncLedger:
                 """
                 SELECT * FROM sync_runs
                 WHERE store = ? AND date = ?
-                ORDER BY started_at DESC
+                ORDER BY started_at DESC, rowid DESC
                 LIMIT 1
                 """,
                 (store, date),
             ).fetchone()
             return dict(row) if row else None
+
+    def get_run(self, sync_id: str):
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM sync_runs WHERE sync_id = ?", (sync_id,)).fetchone()
+            return dict(row) if row else None
+
+    def get_run_events(self, sync_id: str) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT event_type, event_time, payload_json FROM sync_events WHERE sync_id = ? ORDER BY id ASC",
+                (sync_id,),
+            ).fetchall()
+            events = []
+            for row in rows:
+                payload = {}
+                if row["payload_json"]:
+                    try:
+                        payload = json.loads(row["payload_json"])
+                    except Exception:
+                        payload = {"raw": row["payload_json"]}
+                events.append(
+                    {
+                        "event_type": row["event_type"],
+                        "event_time": row["event_time"],
+                        "payload": payload,
+                    }
+                )
+            return events
+
+    def export_run_audit(self, sync_id: str) -> Path:
+        run = self.get_run(sync_id)
+        if not run:
+            raise FileNotFoundError(f"Sync run not found: {sync_id}")
+        events = self.get_run_events(sync_id)
+        self.audit_dir.mkdir(parents=True, exist_ok=True)
+        path = self.audit_dir / f"sync-run-{sync_id}.json"
+        path.write_text(
+            json.dumps({"run": run, "events": events}, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        return path
 
     def diagnostics_snapshot(self) -> dict:
         with self._connect() as conn:

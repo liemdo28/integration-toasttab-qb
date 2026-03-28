@@ -407,6 +407,8 @@ class QBSyncTab(ctk.CTkFrame):
         self._running = False
         self._global_cfg, self._stores = load_mapping()
         self.validation_records = []
+        self.pending_force_reruns = {}
+        self.last_sync_run = None
         self._build_ui()
 
     def _build_ui(self):
@@ -527,8 +529,32 @@ class QBSyncTab(ctk.CTkFrame):
         self.validation_box.pack(fill="x", padx=10, pady=(0, 10))
         self.validation_box.configure(state="disabled")
 
+        # ── Last Sync Status ──
+        status_frame = ctk.CTkFrame(self)
+        status_frame.pack(fill="x", padx=15, pady=(5, 5))
+        status_header = ctk.CTkFrame(status_frame, fg_color="transparent")
+        status_header.pack(fill="x", padx=10, pady=(10, 4))
+        ctk.CTkLabel(status_header, text="Last Sync Status", font=ctk.CTkFont(size=13, weight="bold")).pack(side="left")
+        self.last_sync_summary = ctk.CTkLabel(status_header, text="Select one store and one date to inspect sync history", text_color="gray")
+        self.last_sync_summary.pack(side="left", padx=10)
+
+        status_btn_row = ctk.CTkFrame(status_frame, fg_color="transparent")
+        status_btn_row.pack(fill="x", padx=10, pady=(0, 4))
+        ctk.CTkButton(status_btn_row, text="Refresh Status", width=120, command=self._refresh_last_sync_status).pack(side="left", padx=2)
+        self.export_sync_audit_btn = ctk.CTkButton(status_btn_row, text="Export Sync Audit", width=130, state="disabled", command=self._export_last_sync_audit)
+        self.export_sync_audit_btn.pack(side="left", padx=2)
+        self.mark_stale_btn = ctk.CTkButton(status_btn_row, text="Mark Stale as Failed", width=145, state="disabled", command=self._mark_stale_run_failed)
+        self.mark_stale_btn.pack(side="left", padx=2)
+        self.force_rerun_btn = ctk.CTkButton(status_btn_row, text="Force Re-run", width=110, state="disabled", command=self._force_rerun_selected)
+        self.force_rerun_btn.pack(side="left", padx=2)
+
+        self.last_sync_box = ctk.CTkTextbox(status_frame, height=150, font=ctk.CTkFont(family="Consolas", size=11))
+        self.last_sync_box.pack(fill="x", padx=10, pady=(0, 10))
+        self.last_sync_box.configure(state="disabled")
+
         # ── Log ──
         self.log_box = make_log_box(self)
+        self._refresh_last_sync_status()
 
     def _browse_qbw(self, store_name):
         filepath = filedialog.askopenfilename(
@@ -868,6 +894,7 @@ class QBSyncTab(ctk.CTkFrame):
                                 qb_company_file=qbw_match if not preview else "",
                                 validation_error_count=sum(1 for issue in issues if issue.severity == "error"),
                                 validation_warning_count=sum(1 for issue in issues if issue.severity == "warning") + len(validation.warnings),
+                                override_reason=self.pending_force_reruns.get((orig_name, date_str)),
                             )
                             sync_id = begin_result.sync_id
                             if begin_result.message and begin_result.message != "Sync run started.":
@@ -897,6 +924,7 @@ class QBSyncTab(ctk.CTkFrame):
                                 self.log(f"  [PREVIEW MODE - not creating Sales Receipt]")
                                 ledger.mark_success(sync_id, preview=True)
                                 success_count += 1
+                                self.pending_force_reruns.pop((orig_name, date_str), None)
                                 continue
 
                             if not qb_opened:
@@ -945,6 +973,7 @@ class QBSyncTab(ctk.CTkFrame):
                                 self.log(f"  Sales Receipt created! TxnID: {result.get('txn_id')}")
                                 ledger.mark_success(sync_id, txn_id=result.get("txn_id"))
                                 success_count += 1
+                                self.pending_force_reruns.pop((orig_name, date_str), None)
                             else:
                                 self.log(f"  Error: {result.get('error')}")
                                 ledger.mark_failed(sync_id, result.get("error") or "QuickBooks create_sales_receipt failed")
@@ -971,6 +1000,7 @@ class QBSyncTab(ctk.CTkFrame):
 
             self.update_progress(total_tasks, total_tasks, "Done")
             self.after(0, lambda records=validation_records: self._set_validation_records(records))
+            self.after(0, self._refresh_last_sync_status)
             self.log(f"\nAll done! Success: {success_count}, Failed: {fail_count}")
 
         except Exception as e:
@@ -981,6 +1011,119 @@ class QBSyncTab(ctk.CTkFrame):
             self._running = False
             self.after(0, lambda: self.sync_btn.configure(state="normal", text="Sync to QuickBooks"))
             self.after(0, lambda: self.status_var.set("Ready"))
+
+    def _status_target(self):
+        stores = [name for name, var in self.store_vars.items() if var.get()]
+        dates = [d.strip() for d in self.date_var.get().split(",") if d.strip()]
+        if len(stores) != 1 or len(dates) != 1:
+            return None, None
+        return stores[0], dates[0]
+
+    def _set_last_sync_status(self, run, message=None):
+        self.last_sync_run = run
+        self.last_sync_box.configure(state="normal")
+        self.last_sync_box.delete("1.0", "end")
+
+        if not run:
+            self.last_sync_summary.configure(text=message or "No sync history for current selection", text_color="gray")
+            self.last_sync_box.insert("end", message or "Select one store and one date, then click Refresh Status.")
+            self.last_sync_box.configure(state="disabled")
+            self.export_sync_audit_btn.configure(state="disabled")
+            self.mark_stale_btn.configure(state="disabled")
+            self.force_rerun_btn.configure(state="disabled")
+            return
+
+        status = run.get("status", "unknown")
+        color = "#059669"
+        if status in {"failed", "blocked_duplicate", "blocked_validation"}:
+            color = "#dc2626"
+        elif status in {"running", "preview_success"}:
+            color = "#d97706"
+
+        hash_short = (run.get("report_hash") or "")[:12]
+        lines = [
+            f"Store: {run.get('store')}",
+            f"Date: {run.get('date')}",
+            f"Status: {status}",
+            f"Started: {run.get('started_at') or '-'}",
+            f"Finished: {run.get('finished_at') or '-'}",
+            f"Report Hash: {hash_short or '-'}",
+            f"Ref Number: {run.get('ref_number') or '-'}",
+            f"Preview: {'yes' if run.get('preview') else 'no'}",
+            f"Strict Mode: {'yes' if run.get('strict_mode') else 'no'}",
+            f"QB File: {run.get('qb_company_file') or '-'}",
+            f"Error: {run.get('error_message') or '-'}",
+            f"Override Reason: {run.get('override_reason') or '-'}",
+        ]
+
+        self.last_sync_summary.configure(text=f"{status} | {run.get('store')} | {run.get('date')}", text_color=color)
+        self.last_sync_box.insert("end", "\n".join(lines))
+        self.last_sync_box.configure(state="disabled")
+        self.export_sync_audit_btn.configure(state="normal")
+        self.mark_stale_btn.configure(state="normal" if status == "running" else "disabled")
+        self.force_rerun_btn.configure(
+            state="normal" if status in {"blocked_duplicate", "failed", "blocked_validation", "success"} else "disabled"
+        )
+
+    def _refresh_last_sync_status(self):
+        store, date = self._status_target()
+        if not store or not date:
+            self._set_last_sync_status(None, "Select exactly one store and one date to inspect sync history.")
+            return
+        try:
+            from sync_ledger import SyncLedger
+
+            ledger = SyncLedger()
+            run = ledger.get_last_run(store, date)
+            self._set_last_sync_status(run)
+        except Exception as exc:
+            self._set_last_sync_status(None, f"Could not load sync status: {exc}")
+
+    def _export_last_sync_audit(self):
+        if not self.last_sync_run:
+            return
+        try:
+            from sync_ledger import SyncLedger
+
+            path = SyncLedger().export_run_audit(self.last_sync_run["sync_id"])
+            messagebox.showinfo("Sync Audit Exported", f"Audit exported to:\n{path}")
+        except Exception as exc:
+            messagebox.showerror("Export Error", str(exc))
+
+    def _mark_stale_run_failed(self):
+        if not self.last_sync_run or self.last_sync_run.get("status") != "running":
+            return
+        reason = simpledialog.askstring(
+            "Mark Running Sync as Failed",
+            "Enter a short reason for marking this running sync as failed:",
+            initialvalue="Operator marked stale run as failed",
+        )
+        if not reason:
+            return
+        try:
+            from sync_ledger import SyncLedger
+
+            SyncLedger().operator_mark_failed(self.last_sync_run["sync_id"], reason)
+            self.log(f"Operator marked sync {self.last_sync_run['sync_id']} as failed: {reason}")
+            self._refresh_last_sync_status()
+        except Exception as exc:
+            messagebox.showerror("Ledger Error", str(exc))
+
+    def _force_rerun_selected(self):
+        store, date = self._status_target()
+        if not store or not date:
+            messagebox.showwarning("Select One", "Select exactly one store and one date before forcing a re-run.")
+            return
+        reason = simpledialog.askstring(
+            "Force Re-run",
+            "Why are you forcing this re-run?\nThis reason will be stored in the sync ledger.",
+        )
+        if not reason:
+            return
+        self.pending_force_reruns[(store, date)] = reason
+        self.log(f"Force re-run armed for {store} / {date}: {reason}")
+        messagebox.showinfo("Force Re-run Armed", f"The next sync for {store} / {date} will carry this override reason:\n\n{reason}")
+        self._refresh_last_sync_status()
 
     def _set_validation_records(self, records):
         self.validation_records = records

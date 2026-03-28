@@ -119,6 +119,47 @@ def test_same_date_different_hash_is_allowed_with_warning_message(tmp_path):
     assert "different report version" in second.message.lower()
 
 
+def test_override_reason_allows_rerun_after_success(tmp_path):
+    db_path = tmp_path / "sync-ledger.db"
+    report_path = tmp_path / "report.xlsx"
+    _write_report(report_path, b"report-a")
+    identity = build_report_identity(report_path)
+    ledger = SyncLedger(db_path)
+
+    first = ledger.begin_run(
+        store="Store A",
+        date="2026-03-28",
+        report_path=report_path,
+        report_hash=identity.report_hash,
+        report_size=identity.report_size,
+        report_mtime=identity.report_mtime,
+        ref_number="20260328",
+        preview=False,
+        strict_mode=True,
+        qb_company_file="D:/QB/StoreA.qbw",
+    )
+    ledger.mark_success(first.sync_id, txn_id="TXN123")
+
+    second = ledger.begin_run(
+        store="Store A",
+        date="2026-03-28",
+        report_path=report_path,
+        report_hash=identity.report_hash,
+        report_size=identity.report_size,
+        report_mtime=identity.report_mtime,
+        ref_number="20260328",
+        preview=False,
+        strict_mode=True,
+        qb_company_file="D:/QB/StoreA.qbw",
+        override_reason="Operator confirmed rerun",
+    )
+
+    assert second.allowed is True
+    assert "override" in second.message.lower()
+    last_run = ledger.get_last_run("Store A", "2026-03-28")
+    assert last_run["override_reason"] == "Operator confirmed rerun"
+
+
 def test_preview_success_does_not_block_live_sync(tmp_path):
     db_path = tmp_path / "sync-ledger.db"
     report_path = tmp_path / "report.xlsx"
@@ -193,3 +234,33 @@ def test_stale_running_run_is_marked_failed_and_new_run_is_allowed(tmp_path):
         qb_company_file="D:/QB/StoreA.qbw",
     )
     assert second.allowed is True
+
+
+def test_export_run_audit_writes_run_and_events(tmp_path):
+    db_path = tmp_path / "sync-ledger.db"
+    audit_dir = tmp_path / "audit"
+    report_path = tmp_path / "report.xlsx"
+    _write_report(report_path, b"report-a")
+    identity = build_report_identity(report_path)
+    ledger = SyncLedger(db_path, audit_dir=audit_dir)
+
+    run = ledger.begin_run(
+        store="Store A",
+        date="2026-03-28",
+        report_path=report_path,
+        report_hash=identity.report_hash,
+        report_size=identity.report_size,
+        report_mtime=identity.report_mtime,
+        ref_number="20260328",
+        preview=False,
+        strict_mode=True,
+        qb_company_file="D:/QB/StoreA.qbw",
+    )
+    ledger.mark_failed(run.sync_id, "simulated failure")
+
+    audit_path = ledger.export_run_audit(run.sync_id)
+
+    assert audit_path.exists()
+    text = audit_path.read_text(encoding="utf-8")
+    assert "simulated failure" in text
+    assert run.sync_id in text
