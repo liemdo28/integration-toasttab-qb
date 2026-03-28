@@ -95,6 +95,7 @@ Neu may build co Inno Setup (`ISCC.exe`), script se build them installer `.exe` 
 - `Strict accounting mode` duoc bat mac dinh de chan sync khi report co unmapped category/tax/payment hoac receipt khong can bang
 - Co the tat strict mode khi can debug, nhung khong nen dung cho run production binh thuong
 - Tab `QB Sync` co panel `Validation Issues` rieng de operator xem va export issue CSV/JSON thay vi chi doc log textbox
+- Download Reports gio validate file `.xlsx` sau khi tai, retry neu download/validation fail, va ghi audit manifest vao `audit-logs\download-reports`
 
 ## Release planning
 

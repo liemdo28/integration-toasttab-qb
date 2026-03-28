@@ -35,6 +35,7 @@ from app_paths import APP_DIR, RUNTIME_DIR, app_path, runtime_path
 from audit_utils import export_transactions_snapshot, write_delete_audit
 from delete_policy import load_delete_policy
 from diagnostics import format_report_lines, run_environment_checks
+from report_validator import validate_toast_report_file
 from recovery_center import (
     backup_and_remove,
     ensure_runtime_file_from_example,
@@ -732,6 +733,45 @@ class QBSyncTab(ctk.CTkFrame):
                                 self.log(f"  Report file not available")
                                 fail_count += 1
                                 continue
+
+                            validation = validate_toast_report_file(filepath)
+                            if not validation.ok:
+                                self.log("  Report file validation failed before sync:")
+                                for error in validation.errors:
+                                    self.log(f"    [ERROR] invalid_report_file: {error}")
+                                for warning in validation.warnings:
+                                    self.log(f"    [WARN] report_validation_warning: {warning}")
+                                validation_records.append(
+                                    {
+                                        "store": display_name,
+                                        "date": date_str,
+                                        "report_path": filepath,
+                                        "summary": {"error": len(validation.errors), "warning": len(validation.warnings), "info": 0},
+                                        "issues": [
+                                            {
+                                                "code": "invalid_report_file",
+                                                "message": error,
+                                                "severity": "error",
+                                                "blocking": True,
+                                            }
+                                            for error in validation.errors
+                                        ] + [
+                                            {
+                                                "code": "report_validation_warning",
+                                                "message": warning,
+                                                "severity": "warning",
+                                                "blocking": False,
+                                            }
+                                            for warning in validation.warnings
+                                        ],
+                                    }
+                                )
+                                fail_count += 1
+                                continue
+                            if validation.warnings:
+                                self.log("  Report validation warnings:")
+                                for warning in validation.warnings:
+                                    self.log(f"    [WARN] report_validation_warning: {warning}")
 
                             reader = ToastExcelReader(filepath)
                             issues = []

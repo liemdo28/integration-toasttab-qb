@@ -3,33 +3,38 @@ Toast Report Downloader - Python port of toast-download.mjs
 Uses Playwright to automate downloading Sales Summary reports from Toast website.
 """
 
+import json
 import os
 import re
 import time
 from pathlib import Path
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 from app_paths import runtime_path
+from report_validator import validate_toast_report_file
 
 
 REPORTS_BASE = "https://www.toasttab.com/restaurants/admin/reports"
 DEFAULT_SESSION_FILE = str(runtime_path(".toast-session.json"))
 DEFAULT_DOWNLOAD_DIR = str(runtime_path("toast-reports"))
+DOWNLOAD_AUDIT_DIR = runtime_path("audit-logs", "download-reports")
 
 TOAST_LOCATIONS = ["Stockton", "The Rim", "Stone Oak", "Bandera", "WA1", "WA2", "WA3"]
 
 
 class ToastDownloader:
     def __init__(self, download_dir=None, headless=False, session_file=None,
-                 on_log=None, on_progress=None):
+                 on_log=None, on_progress=None, max_download_attempts=3):
         self.download_dir = download_dir or DEFAULT_DOWNLOAD_DIR
         self.headless = headless
         self.session_file = session_file or DEFAULT_SESSION_FILE
         self.on_log = on_log or (lambda msg: None)
         self.on_progress = on_progress or (lambda cur, total, msg: None)
+        self.max_download_attempts = max(1, int(max_download_attempts))
         self.playwright = None
         self.browser = None
         self.context = None
         self.page = None
+        self.run_audit = []
 
     def log(self, msg):
         self.on_log(msg)
@@ -424,7 +429,7 @@ class ToastDownloader:
         return False
 
     def _download_report(self, save_dir):
-        """Click download icon -> Tab -> Enter. Returns saved filepath or None."""
+        """Click download icon -> Tab -> Enter. Returns file metadata or None."""
         if not self._click_download_icon():
             self.log("    Download button not found")
             return None
@@ -451,12 +456,32 @@ class ToastDownloader:
             filename = download.suggested_filename or "report.xlsx"
             filepath = os.path.join(save_dir, filename)
             download.save_as(filepath)
-            self.log(f"    Downloaded: {filename}")
-            return filepath
+            validation = validate_toast_report_file(filepath)
+            if not validation.ok:
+                self.log(f"    Downloaded file failed validation: {'; '.join(validation.errors)}")
+                return None
+            if validation.warnings:
+                self.log(f"    Download warnings: {'; '.join(validation.warnings)}")
+            self.log(f"    Downloaded: {filename} [{validation.checksum_sha256[:12]}]")
+            return {"filepath": filepath, "validation": validation.to_dict()}
 
         except Exception as e:
             self.log(f"    Download failed: {e}")
             return None
+
+    def _write_audit_manifest(self, results):
+        DOWNLOAD_AUDIT_DIR.mkdir(parents=True, exist_ok=True)
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        manifest = {
+            "generated_at": timestamp,
+            "download_dir": self.download_dir,
+            "results": results,
+            "attempts": self.run_audit,
+        }
+        manifest_path = DOWNLOAD_AUDIT_DIR / f"download-run-{timestamp}.json"
+        manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+        self.log(f"Download audit saved -> {manifest_path}")
+        return manifest_path
 
     def download_reports(self, locations=None, target_date=None):
         """
@@ -564,13 +589,34 @@ class ToastDownloader:
                     self._wait_for_report_ready()
                     self._dismiss_overlays()
 
-                    # Download
-                    filepath = self._download_report(loc_dir)
-                    if filepath:
+                    # Download with validation + retry
+                    download_info = None
+                    last_error = None
+                    for attempt in range(1, self.max_download_attempts + 1):
+                        if attempt > 1:
+                            backoff = min(2 ** (attempt - 1), 8)
+                            self.log(f"    Retry {attempt}/{self.max_download_attempts} after {backoff}s backoff")
+                            self.page.wait_for_timeout(backoff * 1000)
+                            self._dismiss_overlays()
+                            self._wait_for_report_ready()
+                        download_info = self._download_report(loc_dir)
+                        self.run_audit.append({
+                            "location": loc_name,
+                            "date": date_label,
+                            "attempt": attempt,
+                            "success": bool(download_info),
+                        })
+                        if download_info:
+                            break
+                        last_error = "download validation failed or file was not saved"
+
+                    if download_info:
                         results["success"] += 1
-                        results["files"].append({"location": loc_name, "filepath": filepath})
+                        results["files"].append({"location": loc_name, **download_info})
                     else:
                         results["fail"] += 1
+                        if last_error:
+                            self.log(f"    Final failure: {last_error}")
 
             self.on_progress(total_tasks, total_tasks, "Done")
 
@@ -584,6 +630,10 @@ class ToastDownloader:
             self.log(f"Error: {e}")
             raise
         finally:
+            try:
+                self._write_audit_manifest(results)
+            except Exception as exc:
+                self.log(f"Could not write download audit manifest: {exc}")
             self.close()
 
         self.log(f"\nDone! {results['success']}/{results['total']} successful, {results['fail']} failed")
