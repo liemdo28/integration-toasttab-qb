@@ -34,6 +34,19 @@ class ToastDownloader:
     def log(self, msg):
         self.on_log(msg)
 
+    def _click_first_visible(self, selectors, *, timeout=2000, log_msg=None):
+        for sel in selectors:
+            try:
+                el = self.page.locator(sel).first
+                if el.is_visible(timeout=timeout):
+                    el.click()
+                    if log_msg:
+                        self.log(log_msg)
+                    return True
+            except Exception:
+                continue
+        return False
+
     def _start_browser(self):
         """Launch browser and restore session."""
         self.playwright = sync_playwright().start()
@@ -148,13 +161,42 @@ class ToastDownloader:
             return False
 
         self.page.wait_for_timeout(1000)
-        self.page.keyboard.type(search_term, delay=50)
-        self.page.wait_for_timeout(1000)
-        self.page.keyboard.press("Tab")
-        self.page.wait_for_timeout(300)
-        self.page.keyboard.press("Enter")
+        search_inputs = [
+            'input[placeholder*="Search" i]',
+            'input[type="search"]',
+            '[role="searchbox"]',
+            '[role="dialog"] input',
+            '[role="listbox"] input',
+        ]
+        for sel in search_inputs:
+            try:
+                search_input = self.page.locator(sel).first
+                if search_input.is_visible(timeout=1000):
+                    search_input.click()
+                    search_input.fill(search_term)
+                    self.log(f"  Searched location: {search_term}")
+                    self.page.wait_for_timeout(800)
+                    break
+            except Exception:
+                continue
+        else:
+            self.page.keyboard.type(search_term, delay=50)
+            self.page.wait_for_timeout(1000)
 
-        self.log(f"  Switching to: {search_term}")
+        option_selectors = [
+            f'[role="option"]:text-is("{search_term}")',
+            f'[role="menuitem"]:text-is("{search_term}")',
+            f'button:text-is("{search_term}")',
+            f'text="{search_term}"',
+        ]
+        if self._click_first_visible(option_selectors, timeout=1500):
+            self.log(f"  Switching to: {search_term}")
+        else:
+            self.page.keyboard.press("Tab")
+            self.page.wait_for_timeout(300)
+            self.page.keyboard.press("Enter")
+            self.log(f"  Switching to: {search_term} (keyboard fallback)")
+
         self.page.wait_for_timeout(2000)
         try:
             self.page.wait_for_load_state("networkidle", timeout=10000)
@@ -241,20 +283,67 @@ class ToastDownloader:
         # Step 2: Click "Custom date" in dropdown
         # (works whether current mode is Yesterday, Today, Custom, etc.)
         custom_clicked = False
-        try:
-            opt = self.page.locator('text="Custom date"').first
-            if opt.is_visible(timeout=3000):
-                opt.click()
-                self.log(f"    Clicked 'Custom date'")
-                self.page.wait_for_timeout(1000)
-                custom_clicked = True
-        except Exception:
-            pass
+        custom_clicked = self._click_first_visible(
+            [
+                '[role="option"]:text-is("Custom date")',
+                '[role="menuitem"]:text-is("Custom date")',
+                'button:text-is("Custom date")',
+                'text="Custom date"',
+            ],
+            timeout=3000,
+            log_msg="    Clicked 'Custom date'",
+        )
+        if custom_clicked:
+            self.page.wait_for_timeout(1000)
 
         if not custom_clicked:
             self.log("    'Custom date' not found in dropdown")
             self.page.keyboard.press("Escape")
             return False
+
+        dialog_input_selectors = [
+            '[role="dialog"] input',
+            '[data-testid*="date" i] input',
+            'input[placeholder*="MM" i]',
+            'input[inputmode="numeric"]',
+        ]
+        input_handles = []
+        for sel in dialog_input_selectors:
+            try:
+                count = self.page.locator(sel).count()
+                if count >= 2:
+                    input_handles = [self.page.locator(sel).nth(0), self.page.locator(sel).nth(1)]
+                    break
+            except Exception:
+                continue
+
+        if len(input_handles) >= 2:
+            try:
+                for index, handle in enumerate(input_handles[:2]):
+                    handle.click()
+                    handle.press("Control+a")
+                    handle.fill(date_str)
+                    self.page.wait_for_timeout(250)
+                    self.log(f"    {'Start' if index == 0 else 'End'} date: {date_str}")
+
+                if self._click_first_visible(
+                    [
+                        'button:text-is("Apply")',
+                        'button:text-is("Update")',
+                        'text="Apply"',
+                    ],
+                    timeout=1500,
+                    log_msg=f"    Applied date: {date_str}",
+                ):
+                    self.page.wait_for_timeout(3000)
+                    try:
+                        self.page.wait_for_load_state("networkidle", timeout=15000)
+                    except Exception:
+                        pass
+                    self.page.wait_for_timeout(2000)
+                    return True
+            except Exception:
+                self.log("    Explicit date input path failed, falling back to keyboard flow")
 
         # Step 3: Tab 4 times to reach Start date input
         for _ in range(4):
@@ -345,9 +434,18 @@ class ToastDownloader:
         # Wait for download event
         try:
             with self.page.expect_download(timeout=30000) as download_info:
-                self.page.keyboard.press("Tab")
-                self.page.wait_for_timeout(300)
-                self.page.keyboard.press("Enter")
+                explicit_clicked = self._click_first_visible(
+                    [
+                        '[role="menuitem"]:text-matches("Excel|Export|Download", "i")',
+                        'button:text-matches("Excel|Export|Download", "i")',
+                        'text=/Excel|Export|Download/i',
+                    ],
+                    timeout=1200,
+                )
+                if not explicit_clicked:
+                    self.page.keyboard.press("Tab")
+                    self.page.wait_for_timeout(300)
+                    self.page.keyboard.press("Enter")
 
             download = download_info.value
             filename = download.suggested_filename or "report.xlsx"

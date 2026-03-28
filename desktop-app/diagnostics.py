@@ -1,4 +1,5 @@
 import importlib
+import json
 import os
 import sys
 from dataclasses import dataclass
@@ -65,6 +66,24 @@ def _import_check(module_name: str) -> tuple[bool, str]:
         return False, str(exc)
 
 
+def _check_json_file(path: Path, label: str, checks: list[DiagnosticCheck], *, required_keys: list[str] | None = None) -> None:
+    if not path.exists():
+        _add(checks, label, "warning", "Not found")
+        return
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        _add(checks, label, "error", f"Invalid JSON: {exc}")
+        return
+
+    if required_keys:
+        missing = [key for key in required_keys if key not in data]
+        if missing:
+            _add(checks, label, "warning", f"JSON loaded but missing keys: {', '.join(missing)}")
+            return
+    _add(checks, label, "ok", str(path))
+
+
 def run_environment_checks(local_config: dict | None = None) -> DiagnosticReport:
     checks: list[DiagnosticCheck] = []
     local_config = local_config or {}
@@ -128,14 +147,18 @@ def run_environment_checks(local_config: dict | None = None) -> DiagnosticReport
     _add(checks, "QuickBooks Executable", "ok" if qb_exe.exists() else "warning", str(qb_exe))
 
     credentials_path = runtime_path("credentials.json")
-    if credentials_path.exists():
-        _add(checks, "Google Credentials", "ok", str(credentials_path))
-    else:
-        _add(checks, "Google Credentials", "warning", "credentials.json not found")
+    _check_json_file(
+        credentials_path,
+        "Google Credentials",
+        checks,
+        required_keys=["installed"],
+    )
 
-    for name in ("token.json", ".toast-session.json"):
-        path = runtime_path(name)
-        _add(checks, name, "ok" if path.exists() else "warning", "Found" if path.exists() else "Not found")
+    token_path = runtime_path("token.json")
+    _check_json_file(token_path, "token.json", checks)
+
+    session_path = runtime_path(".toast-session.json")
+    _check_json_file(session_path, ".toast-session.json", checks, required_keys=["cookies", "origins"])
 
     reports_dir = runtime_path("toast-reports")
     if reports_dir.exists():

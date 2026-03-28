@@ -36,6 +36,7 @@ Output mac dinh:
 
 - [Release readiness checklist](E:/Project/Toasttab Quickbook/New folder/integration-toasttab-qb/docs/RELEASE_READINESS_CHECKLIST.md)
 - [Secret remediation](E:/Project/Toasttab Quickbook/New folder/integration-toasttab-qb/docs/SECRET_REMEDIATION.md)
+- [Test program](E:/Project/Toasttab Quickbook/New folder/integration-toasttab-qb/docs/TEST_PROGRAM.md)
 
 ## Security note
 

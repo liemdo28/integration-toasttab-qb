@@ -1,0 +1,53 @@
+name: Windows CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  test-and-build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r desktop-app/requirements.txt
+          pip install -r desktop-app/requirements-dev.txt
+          pip install -r desktop-app/requirements-build.txt
+
+      - name: Install Playwright Chromium
+        run: python -m playwright install chromium
+
+      - name: Run syntax check
+        run: |
+          python -m py_compile `
+            desktop-app/app.py `
+            desktop-app/app_paths.py `
+            desktop-app/audit_utils.py `
+            desktop-app/delete_policy.py `
+            desktop-app/diagnostics.py `
+            desktop-app/gdrive_service.py `
+            desktop-app/qb_automate.py `
+            desktop-app/qb_client.py `
+            desktop-app/qb_sync.py `
+            desktop-app/toast_downloader.py
+
+      - name: Run tests
+        run: python -m pytest -q tests
+
+      - name: Run diagnostics smoke check
+        run: python desktop-app/app.py --doctor-cli
+
+      - name: Build desktop app smoke test
+        working-directory: desktop-app
+        run: pyinstaller ToastPOSManager.spec --noconfirm

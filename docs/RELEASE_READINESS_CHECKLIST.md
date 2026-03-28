@@ -62,7 +62,7 @@ Chua hoan tat:
 ## P2 - Important for maintainability
 
 - [ ] Tach bot orchestration khoi `desktop-app/app.py`
-- [ ] Them CI cho syntax check, pytest, va desktop build smoke test
+- [x] Them CI cho syntax check, pytest, va desktop build smoke test
 - [ ] Nang cap UX cho less-technical users
   - [ ] thong diep loi ro hon
   - [ ] summary ket qua sau moi job
