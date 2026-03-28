@@ -3,6 +3,7 @@ from pathlib import Path
 
 import openpyxl
 
+from app import QBSyncTab
 import qb_sync
 from qb_sync import ValidationIssue
 
@@ -302,3 +303,47 @@ def test_build_item_add_qbxml_uses_noninventory_sales_and_purchase_when_availabl
     assert "<IncomeAccountRef>" in qbxml
     assert "<ExpenseAccountRef>" in qbxml
     assert "<COGSAccountRef>" in qbxml
+
+
+def test_validate_proposed_item_name_blocks_suspicious_values():
+    issues = qb_sync.validate_proposed_item_name("Temp::X")
+
+    assert issues
+    assert any("temporary" in issue.lower() or "vague" in issue.lower() for issue in issues)
+    assert any("cannot start/end" in issue.lower() or "empty parent segments" in issue.lower() for issue in issues)
+
+
+def test_choose_qb_item_template_prefers_same_family_match():
+    tab = QBSyncTab.__new__(QBSyncTab)
+    candidate = {
+        "source_name": "Uber",
+        "report": "Uber Fee",
+        "note": "Uber marketplace map",
+        "current_qb": "",
+    }
+    items = [
+        {"name": "Income:General Sales", "type": "ItemService", "can_clone": True},
+        {"name": "Marketplace:Uber Fee", "type": "ItemService", "can_clone": True},
+    ]
+
+    template = tab._choose_qb_item_template(candidate, items, [], "Marketplace:Uber Fee New")
+
+    assert template["name"] == "Marketplace:Uber Fee"
+
+
+def test_choose_qb_item_template_blocks_family_mismatch_fallback():
+    tab = QBSyncTab.__new__(QBSyncTab)
+    candidate = {
+        "source_name": "DoorDash",
+        "report": "DoorDash Clearing",
+        "note": "DoorDash marketplace map",
+        "current_qb": "",
+    }
+    items = [
+        {"name": "Income:General Sales", "type": "ItemService", "can_clone": True},
+        {"name": "Fees:Marketing Expense", "type": "ItemService", "can_clone": True},
+    ]
+
+    template = tab._choose_qb_item_template(candidate, items, [], "Marketplace:DoorDash Clearing")
+
+    assert template is None

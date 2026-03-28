@@ -79,3 +79,40 @@ def write_delete_audit(rows: list[dict], summary: dict, base_dir: Path, prefix: 
     json_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
     return {"csv_path": str(csv_path), "json_path": str(json_path)}
+
+
+def write_item_creation_audit(payload: dict, base_dir: Path, prefix: str = "item-create") -> dict[str, str]:
+    base_dir = _ensure_dir(base_dir)
+    stamp = _timestamp()
+    csv_path = base_dir / f"{stamp}_{prefix}.csv"
+    json_path = base_dir / f"{stamp}_{prefix}.json"
+
+    fieldnames = [
+        "generated_at",
+        "operator",
+        "store",
+        "qbw_path",
+        "candidate_key",
+        "candidate_issue_code",
+        "candidate_store",
+        "candidate_date",
+        "candidate_report",
+        "candidate_note",
+        "source_name",
+        "created_item",
+        "created_item_type",
+        "template_name",
+        "template_type",
+        "template_account",
+        "status",
+        "message",
+    ]
+
+    row = {key: payload.get(key, "") for key in fieldnames}
+    with csv_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerow(row)
+
+    json_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return {"csv_path": str(csv_path), "json_path": str(json_path)}

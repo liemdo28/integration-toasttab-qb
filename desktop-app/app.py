@@ -32,7 +32,7 @@ import tkinter as tk
 from tkinter import messagebox
 from tkcalendar import Calendar
 from app_paths import APP_DIR, RUNTIME_DIR, app_path, runtime_path
-from audit_utils import export_transactions_snapshot, write_delete_audit
+from audit_utils import export_transactions_snapshot, write_delete_audit, write_item_creation_audit
 from delete_policy import load_delete_policy
 from diagnostics import format_report_lines, run_environment_checks
 from report_validator import validate_toast_report_file
@@ -51,6 +51,7 @@ REPORTS_DIR = runtime_path("toast-reports")
 AUDIT_LOG_DIR = runtime_path("audit-logs")
 DELETE_AUDIT_DIR = AUDIT_LOG_DIR / "delete-transactions"
 QBSYNC_ISSUE_DIR = AUDIT_LOG_DIR / "qb-sync-validation"
+ITEM_CREATION_AUDIT_DIR = AUDIT_LOG_DIR / "item-creations"
 
 # Toast locations (for download tab)
 TOAST_LOCATIONS = ["Stockton", "The Rim", "Stone Oak", "Bandera", "WA1", "WA2", "WA3"]
@@ -1984,7 +1985,59 @@ class QBSyncTab(ctk.CTkFrame):
                 return item
         return None
 
-    def _choose_qb_item_template(self, candidate, items, suggestions):
+    def _infer_item_family(self, candidate, qb_item):
+        source_name = (candidate.get("source_name") or "").strip().lower()
+        report = (candidate.get("report") or "").strip().lower()
+        note = (candidate.get("note") or "").strip().lower()
+        item_name = (qb_item or "").strip().lower()
+        combined = " | ".join([item_name, report, note, source_name])
+
+        if "clearing" in combined:
+            return "clearing"
+        if "fee" in combined or "commission" in combined:
+            return "fee"
+        if "tax" in combined:
+            return "tax"
+        if "tip" in combined or "gratuity" in combined:
+            return "tip"
+        if "service charge" in combined or "servicecharge" in combined:
+            return "service_charge"
+        if "gift" in combined:
+            return "gift"
+        if "uber" in combined:
+            return "uber"
+        if "doordash" in combined or "door dash" in combined:
+            return "doordash"
+        if "grubhub" in combined or "grub hub" in combined:
+            return "grubhub"
+        return ""
+
+    def _template_matches_family(self, template_item, family):
+        if not family:
+            return True
+        template_name = (template_item.get("name") or "").strip().lower()
+        if family == "service_charge":
+            return "service charge" in template_name or "servicecharge" in template_name
+        if family == "doordash":
+            return "doordash" in template_name or "door dash" in template_name
+        if family == "grubhub":
+            return "grubhub" in template_name or "grub hub" in template_name
+        return family in template_name
+
+    def _template_matches_parent(self, template_item, qb_item):
+        target_parent, _ = self._split_item_name(qb_item)
+        if not target_parent:
+            return True
+        template_parent, _ = self._split_item_name(template_item.get("name") or "")
+        return (template_parent or "").strip().lower() == target_parent.strip().lower()
+
+    def _split_item_name(self, item_name):
+        from qb_sync import split_qb_item_full_name
+
+        return split_qb_item_full_name(item_name)
+
+    def _choose_qb_item_template(self, candidate, items, suggestions, qb_item):
+        family = self._infer_item_family(candidate, qb_item)
         preferred_names = []
         current_qb = (candidate.get("current_qb") or "").strip()
         if current_qb:
@@ -1999,11 +2052,29 @@ class QBSyncTab(ctk.CTkFrame):
                 continue
             seen.add(normalized)
             exact = self._find_exact_qb_item(name, items)
-            if exact and exact.get("can_clone"):
+            if (
+                exact
+                and exact.get("can_clone")
+                and self._template_matches_family(exact, family)
+                and self._template_matches_parent(exact, qb_item)
+            ):
                 return exact
 
+        family_matches = [
+            item
+            for item in items
+            if item.get("can_clone")
+            and self._template_matches_family(item, family)
+            and self._template_matches_parent(item, qb_item)
+        ]
+        if family_matches:
+            return sorted(family_matches, key=lambda item: item.get("name", "").lower())[0]
+
+        if family:
+            return None
+
         for item in items:
-            if item.get("can_clone"):
+            if item.get("can_clone") and self._template_matches_parent(item, qb_item):
                 return item
         return None
 
@@ -2016,13 +2087,24 @@ class QBSyncTab(ctk.CTkFrame):
             lines.append(f"- {item.get('name')} ({item.get('type')}, account: {account_name})")
         return "\n".join(lines)
 
+    def _write_item_creation_audit(self, payload):
+        ITEM_CREATION_AUDIT_DIR.mkdir(parents=True, exist_ok=True)
+        audit_files = write_item_creation_audit(payload, ITEM_CREATION_AUDIT_DIR)
+        self.log(f"Item creation audit -> {audit_files['json_path']}")
+        return audit_files
+
     def _ensure_qb_item_available(self, candidate, qb_item, *, allow_create):
-        from qb_sync import QBSyncClient, suggest_similar_items
+        from qb_sync import QBSyncClient, suggest_similar_items, validate_proposed_item_name
 
         store_name = self._get_mapping_base_store(candidate)
+        normalized_qb_item = qb_item.strip()
+        naming_issues = validate_proposed_item_name(normalized_qb_item)
+        if naming_issues:
+            raise ValueError("QB item name failed policy checks:\n- " + "\n- ".join(naming_issues))
+
         catalog = self._get_qb_item_catalog(store_name)
         items = catalog["items"]
-        exact = self._find_exact_qb_item(qb_item, items)
+        exact = self._find_exact_qb_item(normalized_qb_item, items)
         if exact:
             self._set_mapping_item_status(
                 f"QB item found in {store_name}: {exact.get('name')} ({exact.get('type')})",
@@ -2030,7 +2112,7 @@ class QBSyncTab(ctk.CTkFrame):
             )
             return True
 
-        suggestions = suggest_similar_items(qb_item, items)
+        suggestions = suggest_similar_items(normalized_qb_item, items)
         suggestion_text = self._format_qb_item_suggestions(suggestions)
         self._set_mapping_item_status(
             f"QB item not found in {store_name}. {len(suggestions)} close match(es) available.",
@@ -2039,21 +2121,21 @@ class QBSyncTab(ctk.CTkFrame):
         if not allow_create:
             messagebox.showwarning(
                 "QB Item Not Found",
-                f"The QB item '{qb_item}' was not found in {store_name}.\n\nClose matches:\n{suggestion_text}",
+                f"The QB item '{normalized_qb_item}' was not found in {store_name}.\n\nClose matches:\n{suggestion_text}",
             )
             return False
 
-        template_item = self._choose_qb_item_template(candidate, items, suggestions)
+        template_item = self._choose_qb_item_template(candidate, items, suggestions, normalized_qb_item)
         if not template_item:
             raise ValueError(
-                f"The QB item '{qb_item}' was not found in {store_name}, and no supported template item was available to clone.\n\n"
+                f"The QB item '{normalized_qb_item}' was not found in {store_name}, and no policy-safe template item was available to clone.\n\n"
                 f"Close matches:\n{suggestion_text}"
             )
 
         answer = messagebox.askyesnocancel(
             "Create QB Item?",
             (
-                f"The QB item '{qb_item}' was not found in {store_name}.\n\n"
+                f"The QB item '{normalized_qb_item}' was not found in {store_name}.\n\n"
                 f"Close matches:\n{suggestion_text}\n\n"
                 f"Create a new QB item now using template '{template_item.get('name')}' "
                 f"({template_item.get('type')})?\n\n"
@@ -2068,29 +2150,60 @@ class QBSyncTab(ctk.CTkFrame):
             return False
 
         qbw_path = catalog["qbw_path"]
-        self.status_var.set(f"Creating QB item '{qb_item}' for {store_name}...")
+        self.status_var.set(f"Creating QB item '{normalized_qb_item}' for {store_name}...")
+        audit_payload = {
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "operator": os.environ.get("USERNAME", "") or os.environ.get("USER", ""),
+            "store": store_name,
+            "qbw_path": qbw_path,
+            "candidate_key": candidate.get("key", ""),
+            "candidate_issue_code": candidate.get("issue_code", ""),
+            "candidate_store": candidate.get("store", ""),
+            "candidate_date": candidate.get("date", ""),
+            "candidate_report": candidate.get("report", ""),
+            "candidate_note": candidate.get("note", ""),
+            "source_name": candidate.get("source_name", ""),
+            "created_item": normalized_qb_item,
+            "created_item_type": "",
+            "template_name": template_item.get("name", ""),
+            "template_type": template_item.get("type", ""),
+            "template_account": template_item.get("account_name") or template_item.get("income_account_name") or "",
+            "status": "requested",
+            "message": "Operator confirmed item creation from Mapping Maintenance.",
+        }
         qb = QBSyncClient(app_name="Toast Report Sync", qbxml_version="13.0")
         qb.connect()
         try:
-            result = qb.create_item_from_template(qb_item, template_item)
+            result = qb.create_item_from_template(normalized_qb_item, template_item)
         finally:
             qb.disconnect()
         if not result.get("success"):
-            raise ValueError(result.get("error") or f"Could not create QB item '{qb_item}'.")
+            audit_payload["status"] = "failed"
+            audit_payload["message"] = result.get("error") or "QuickBooks item creation failed."
+            self._write_item_creation_audit(audit_payload)
+            raise ValueError(result.get("error") or f"Could not create QB item '{normalized_qb_item}'.")
 
         cache_key = (store_name, qbw_path.lower())
         self._qb_item_catalog_cache.pop(cache_key, None)
         refreshed = self._get_qb_item_catalog(store_name, force_refresh=True)
-        exact = self._find_exact_qb_item(qb_item, refreshed["items"])
+        exact = self._find_exact_qb_item(normalized_qb_item, refreshed["items"])
         if not exact:
+            audit_payload["status"] = "refresh_mismatch"
+            audit_payload["message"] = "Item creation reported success but refreshed catalog did not return the item."
+            self._write_item_creation_audit(audit_payload)
             raise ValueError(
-                f"QB reported item creation success for '{qb_item}', but the item did not appear in the refreshed catalog."
+                f"QB reported item creation success for '{normalized_qb_item}', but the item did not appear in the refreshed catalog."
             )
         self.log(
-            f"Created QB item -> {store_name} | {qb_item} | template={template_item.get('name')} ({template_item.get('type')})"
+            f"Created QB item -> {store_name} | {normalized_qb_item} | template={template_item.get('name')} ({template_item.get('type')})"
         )
+        audit_payload["status"] = "created"
+        audit_payload["message"] = "QuickBooks item created and verified after catalog refresh."
+        audit_payload["created_item"] = exact.get("name") or normalized_qb_item
+        audit_payload["created_item_type"] = exact.get("type", "")
+        audit_files = self._write_item_creation_audit(audit_payload)
         self._set_mapping_item_status(
-            f"QB item created in {store_name}: {exact.get('name')} ({exact.get('type')})",
+            f"QB item created in {store_name}: {exact.get('name')} ({exact.get('type')}) | audit: {Path(audit_files['json_path']).name}",
             "#16a34a",
         )
         return True
@@ -3360,6 +3473,7 @@ def main(argv=None):
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     AUDIT_LOG_DIR.mkdir(parents=True, exist_ok=True)
     QBSYNC_ISSUE_DIR.mkdir(parents=True, exist_ok=True)
+    ITEM_CREATION_AUDIT_DIR.mkdir(parents=True, exist_ok=True)
     if args.doctor_cli:
         return run_cli_doctor()
 

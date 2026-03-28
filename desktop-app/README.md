@@ -103,6 +103,7 @@ Neu may build co Inno Setup (`ISCC.exe`), script se build them installer `.exe` 
 - Tab `QB Sync` gio co `Mapping Maintenance` de operator sua map category/tax/payment ngay trong app, luu vao CSV map, roi re-run preview ma khong can dev sua file thu cong
 - Mapping Maintenance gio co nut `Save + Re-run Preview` de save map xong thi app tu chon dung store/date va chay preview lai ngay
 - Mapping Maintenance gio kiem tra `QB Item` tren dung `.qbw` cua store, goi y item gan dung neu nhap lech, va chi tao item moi trong QuickBooks sau khi operator xac nhan
+- Item create moi gio co them audit file rieng va naming/template policy co ban de giam clone sai family hoac tao ten item rac
 - Stockton/Raw gio co them 3 receipt bo sung theo customer rieng cho `Uber`, `DoorDash`, `Grubhub`; Toasttab van la receipt chinh va duoc download bang giao dien Toast website, con 3 CSV marketplace duoc operator chon thu cong trong tab `QB Sync`
 - `Mapping Maintenance` gio nhan ca marketplace issues (`missing column`, `invalid mapping type`, `unbalanced receipt`) de operator sua ngay `QB/Column/Type` trong app thay vi phai mo CSV map thu cong
 - `Last Sync Status` gio co them `source audit details`: report path, hash, map file, source mode, va biet file marketplace nao do user chon

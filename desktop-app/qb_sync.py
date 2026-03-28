@@ -38,6 +38,11 @@ def normalize_item_name(value: str) -> str:
     return "".join(ch.lower() for ch in str(value or "") if ch.isalnum())
 
 
+def normalize_item_path(value: str) -> str:
+    parts = [part.strip() for part in str(value or "").split(":") if part.strip()]
+    return ":".join(parts)
+
+
 def split_qb_item_full_name(value: str) -> tuple[str, str]:
     parts = [part.strip() for part in str(value or "").split(":") if part.strip()]
     if not parts:
@@ -77,6 +82,44 @@ def suggest_similar_items(item_name: str, items: list[dict], *, limit: int = 5) 
 
     scored.sort(key=lambda entry: (-entry[0], entry[1].get("name", "").lower()))
     return [item for _, item in scored[:limit]]
+
+
+def validate_proposed_item_name(item_name: str) -> list[str]:
+    normalized = normalize_item_path(item_name)
+    if not normalized:
+        return ["QB item name is required."]
+
+    issues: list[str] = []
+    if normalized != item_name.strip():
+        issues.append("Use clean QuickBooks item formatting without extra spaces around ':' separators.")
+    if normalized.startswith(":") or normalized.endswith(":") or "::" in item_name:
+        issues.append("Item name cannot start/end with ':' or contain empty parent segments.")
+    if len(normalized) > 120:
+        issues.append("Item name is too long for a clean QuickBooks item naming policy.")
+
+    parent_name, leaf_name = split_qb_item_full_name(normalized)
+    if not leaf_name or len(leaf_name) < 2:
+        issues.append("Item leaf name is too short.")
+
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 &()-_/:.,")
+    bad_chars = sorted({ch for ch in normalized if ch not in allowed})
+    if bad_chars:
+        issues.append(f"Item name contains unsupported characters: {' '.join(bad_chars)}")
+
+    suspicious_tokens = {"test", "temp", "new item", "misc", "unknown", "fix later"}
+    lowered = normalized.lower()
+    for token in suspicious_tokens:
+        if token in lowered:
+            issues.append(f"Item name looks temporary or too vague: '{token}'")
+            break
+
+    if parent_name:
+        for part in [part.strip() for part in normalized.split(":")]:
+            if len(part) < 2:
+                issues.append("Each parent/item segment should be at least 2 characters.")
+                break
+
+    return issues
 
 
 def build_item_add_qbxml(item_name: str, template_item: dict, *, qbxml_version: str = "13.0") -> str:
