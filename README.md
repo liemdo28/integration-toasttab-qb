@@ -38,7 +38,17 @@ Output mac dinh:
 - [Release readiness checklist](E:/Project/Toasttab Quickbook/New folder/integration-toasttab-qb/docs/RELEASE_READINESS_CHECKLIST.md)
 - [Secret remediation](E:/Project/Toasttab Quickbook/New folder/integration-toasttab-qb/docs/SECRET_REMEDIATION.md)
 - [Test program](E:/Project/Toasttab Quickbook/New folder/integration-toasttab-qb/docs/TEST_PROGRAM.md)
+- [Current state review](E:/Project/Toasttab Quickbook/New folder/integration-toasttab-qb/docs/CURRENT_STATE_REVIEW.md)
+- [Operator guide](E:/Project/Toasttab Quickbook/New folder/integration-toasttab-qb/docs/OPERATOR_GUIDE.md)
+- [Final app requirements](E:/Project/Toasttab Quickbook/New folder/integration-toasttab-qb/docs/FINAL_APP_REQUIREMENTS.md)
+- [Engineering policy](E:/Project/Toasttab Quickbook/New folder/integration-toasttab-qb/POLICY.md)
 
 ## Security note
 
 Legacy commits cua repo cu co chua credential that. Muc hardening trong source da duoc them, nhung rotate secret va rewrite Git history van la buoc bat buoc truoc khi phat hanh rong.
+
+## Repo gate
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\final_app_gate.ps1
+```

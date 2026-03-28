@@ -99,6 +99,10 @@ Neu may build co Inno Setup (`ISCC.exe`), script se build them installer `.exe` 
 
 - P0/P1/P2 checklist: [docs/RELEASE_READINESS_CHECKLIST.md](E:/Project/Toasttab Quickbook/New folder/integration-toasttab-qb/docs/RELEASE_READINESS_CHECKLIST.md)
 - Secret cleanup plan: [docs/SECRET_REMEDIATION.md](E:/Project/Toasttab Quickbook/New folder/integration-toasttab-qb/docs/SECRET_REMEDIATION.md)
+- Current state review: [docs/CURRENT_STATE_REVIEW.md](E:/Project/Toasttab Quickbook/New folder/integration-toasttab-qb/docs/CURRENT_STATE_REVIEW.md)
+- Operator guide: [docs/OPERATOR_GUIDE.md](E:/Project/Toasttab Quickbook/New folder/integration-toasttab-qb/docs/OPERATOR_GUIDE.md)
+- Final app requirements: [docs/FINAL_APP_REQUIREMENTS.md](E:/Project/Toasttab Quickbook/New folder/integration-toasttab-qb/docs/FINAL_APP_REQUIREMENTS.md)
+- Engineering policy: [POLICY.md](E:/Project/Toasttab Quickbook/New folder/integration-toasttab-qb/POLICY.md)
 
 ## Delete safety
 
