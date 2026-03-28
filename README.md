@@ -32,6 +32,11 @@ Output mac dinh:
 
 - `desktop-app\dist\ToastPOSManager\ToastPOSManager.exe`
 
+## Planning docs
+
+- [Release readiness checklist](E:/Project/Toasttab Quickbook/New folder/integration-toasttab-qb/docs/RELEASE_READINESS_CHECKLIST.md)
+- [Secret remediation](E:/Project/Toasttab Quickbook/New folder/integration-toasttab-qb/docs/SECRET_REMEDIATION.md)
+
 ## Security note
 
 Legacy commits cua repo cu co chua credential that. Muc hardening trong source da duoc them, nhung rotate secret va rewrite Git history van la buoc bat buoc truoc khi phat hanh rong.

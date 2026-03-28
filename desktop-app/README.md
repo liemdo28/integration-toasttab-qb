@@ -86,6 +86,11 @@ Output:
 
 - `dist\ToastPOSManager\ToastPOSManager.exe`
 
+## Release planning
+
+- P0/P1/P2 checklist: [docs/RELEASE_READINESS_CHECKLIST.md](E:/Project/Toasttab Quickbook/New folder/integration-toasttab-qb/docs/RELEASE_READINESS_CHECKLIST.md)
+- Secret cleanup plan: [docs/SECRET_REMEDIATION.md](E:/Project/Toasttab Quickbook/New folder/integration-toasttab-qb/docs/SECRET_REMEDIATION.md)
+
 ## Delete safety
 
 - Remove Transactions co `Dry run only` mac dinh
