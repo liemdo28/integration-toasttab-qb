@@ -32,7 +32,12 @@ import tkinter as tk
 from tkinter import messagebox
 from tkcalendar import Calendar
 from app_paths import APP_DIR, RUNTIME_DIR, app_path, runtime_path
-from audit_utils import export_transactions_snapshot, write_delete_audit, write_item_creation_audit
+from audit_utils import (
+    export_transactions_snapshot,
+    load_recent_item_creation_audits,
+    write_delete_audit,
+    write_item_creation_audit,
+)
 from delete_policy import load_delete_policy
 from diagnostics import format_report_lines, run_environment_checks
 from report_validator import validate_toast_report_file
@@ -52,6 +57,7 @@ AUDIT_LOG_DIR = runtime_path("audit-logs")
 DELETE_AUDIT_DIR = AUDIT_LOG_DIR / "delete-transactions"
 QBSYNC_ISSUE_DIR = AUDIT_LOG_DIR / "qb-sync-validation"
 ITEM_CREATION_AUDIT_DIR = AUDIT_LOG_DIR / "item-creations"
+QB_ITEM_CACHE_TTL_SECONDS = 300
 
 # Toast locations (for download tab)
 TOAST_LOCATIONS = ["Stockton", "The Rim", "Stone Oak", "Bandera", "WA1", "WA2", "WA3"]
@@ -698,12 +704,28 @@ class QBSyncTab(ctk.CTkFrame):
         mapping_qb_row.pack(fill="x", padx=10, pady=(0, 4))
         self.check_mapping_item_btn = ctk.CTkButton(
             mapping_qb_row,
-            text="Check / Create QB Item",
-            width=170,
+            text="Check Existing Item",
+            width=145,
             state="disabled",
             command=self._check_selected_mapping_item,
         )
         self.check_mapping_item_btn.pack(side="left", padx=2)
+        self.create_mapping_item_btn = ctk.CTkButton(
+            mapping_qb_row,
+            text="Create Missing Item",
+            width=145,
+            state="disabled",
+            command=self._create_selected_mapping_item,
+        )
+        self.create_mapping_item_btn.pack(side="left", padx=2)
+        self.refresh_catalog_btn = ctk.CTkButton(
+            mapping_qb_row,
+            text="Refresh QB Catalog",
+            width=140,
+            state="disabled",
+            command=self._refresh_selected_mapping_catalog,
+        )
+        self.refresh_catalog_btn.pack(side="left", padx=2)
         self.mapping_item_status = ctk.CTkLabel(
             mapping_qb_row,
             text="QB item validation not run yet",
@@ -715,6 +737,16 @@ class QBSyncTab(ctk.CTkFrame):
         self.mapping_detail_box = ctk.CTkTextbox(mapping_frame, height=135, font=ctk.CTkFont(family="Consolas", size=11))
         self.mapping_detail_box.pack(fill="x", padx=10, pady=(0, 10))
         self.mapping_detail_box.configure(state="disabled")
+
+        history_frame = ctk.CTkFrame(mapping_frame, fg_color="transparent")
+        history_frame.pack(fill="x", padx=10, pady=(0, 4))
+        ctk.CTkLabel(history_frame, text="Recent Item Creation History", font=ctk.CTkFont(size=12, weight="bold")).pack(side="left")
+        ctk.CTkButton(history_frame, text="Refresh History", width=120, command=self._refresh_item_creation_history).pack(side="left", padx=10)
+        ctk.CTkButton(history_frame, text="Open Audit Folder", width=125, command=self._open_item_creation_audit_folder).pack(side="left", padx=2)
+
+        self.item_creation_history_box = ctk.CTkTextbox(mapping_frame, height=110, font=ctk.CTkFont(family="Consolas", size=11))
+        self.item_creation_history_box.pack(fill="x", padx=10, pady=(0, 10))
+        self.item_creation_history_box.configure(state="disabled")
 
         # ── Last Sync Status ──
         status_frame = ctk.CTkFrame(self)
@@ -748,6 +780,7 @@ class QBSyncTab(ctk.CTkFrame):
         self._refresh_mapping_candidates()
         self._refresh_marketplace_source_statuses()
         self._refresh_last_sync_status()
+        self._refresh_item_creation_history()
 
     def _browse_qbw(self, store_name):
         filepath = filedialog.askopenfilename(
@@ -1821,6 +1854,8 @@ class QBSyncTab(ctk.CTkFrame):
             self.save_mapping_btn.configure(state="disabled")
             self.save_and_preview_btn.configure(state="disabled")
             self.check_mapping_item_btn.configure(state="disabled")
+            self.create_mapping_item_btn.configure(state="disabled")
+            self.refresh_catalog_btn.configure(state="disabled")
             self.mapping_detail_box.insert("end", message or "Run Preview/Sync first, then use Validation Issues to drive mapping fixes here.")
             self.mapping_detail_box.configure(state="disabled")
             return
@@ -1885,6 +1920,8 @@ class QBSyncTab(ctk.CTkFrame):
         self.save_mapping_btn.configure(state="normal")
         self.save_and_preview_btn.configure(state="normal")
         self.check_mapping_item_btn.configure(state="normal")
+        self.create_mapping_item_btn.configure(state="normal")
+        self.refresh_catalog_btn.configure(state="normal")
 
     def _refresh_mapping_candidates(self):
         try:
@@ -1927,20 +1964,101 @@ class QBSyncTab(ctk.CTkFrame):
             return "Copper"
         return store_name
 
-    def _get_qb_item_catalog(self, store_name, *, force_refresh=False):
+    def _get_catalog_cache_key(self, store_name, qbw_path):
+        return (store_name, qbw_path.lower())
+
+    def _get_catalog_age_seconds(self, cache_entry):
+        loaded_at = cache_entry.get("loaded_at")
+        if not loaded_at:
+            return None
+        return max(0, time.time() - loaded_at)
+
+    def _format_catalog_age(self, age_seconds):
+        if age_seconds is None:
+            return "unknown age"
+        if age_seconds < 60:
+            return f"{int(age_seconds)}s old"
+        return f"{int(age_seconds // 60)}m {int(age_seconds % 60)}s old"
+
+    def _get_qbw_path_for_store(self, store_name):
         qbw_path = (self.qbw_path_vars.get(store_name).get().strip() if self.qbw_path_vars.get(store_name) else "").strip()
         if not qbw_path:
             saved_paths = (self._local_cfg or {}).get("qbw_paths", {})
             qbw_path = (saved_paths.get(store_name) or "").strip()
+        return qbw_path
+
+    def _open_item_creation_audit_folder(self):
+        try:
+            ITEM_CREATION_AUDIT_DIR.mkdir(parents=True, exist_ok=True)
+            os.startfile(str(ITEM_CREATION_AUDIT_DIR))
+        except Exception as exc:
+            messagebox.showerror("Open Audit Folder Failed", str(exc))
+
+    def _refresh_item_creation_history(self):
+        self.item_creation_history_box.configure(state="normal")
+        self.item_creation_history_box.delete("1.0", "end")
+        records = load_recent_item_creation_audits(ITEM_CREATION_AUDIT_DIR, limit=8)
+        if not records:
+            self.item_creation_history_box.insert("end", "No item creation audit records yet.")
+            self.item_creation_history_box.configure(state="disabled")
+            return
+
+        lines = []
+        for record in records:
+            lines.extend(
+                [
+                    f"{record.get('generated_at') or record.get('_modified_at')} | {record.get('store') or '-'} | {record.get('status') or '-'}",
+                    f"  Item     : {record.get('created_item') or '-'} ({record.get('created_item_type') or '-'})",
+                    f"  Template : {record.get('template_name') or '-'} ({record.get('template_type') or '-'})",
+                    f"  Operator : {record.get('operator') or '-'}",
+                    f"  Audit    : {Path(record.get('_audit_path') or '').name or '-'}",
+                    "",
+                ]
+            )
+        self.item_creation_history_box.insert("end", "\n".join(lines).rstrip())
+        self.item_creation_history_box.configure(state="disabled")
+
+    def _refresh_selected_mapping_catalog(self):
+        if not self.selected_mapping_candidate:
+            return
+        try:
+            store_name = self._get_mapping_base_store(self.selected_mapping_candidate)
+            catalog = self._get_qb_item_catalog(store_name, force_refresh=True)
+            self._set_mapping_item_status(
+                f"QB catalog refreshed for {store_name}: {len(catalog['items'])} items loaded",
+                "#2563eb",
+            )
+        except Exception as exc:
+            self._set_mapping_item_status("QB catalog refresh failed", "#dc2626")
+            messagebox.showerror(
+                "Refresh QB Catalog Failed",
+                f"{exc}\n\nRecovery tips:\n- Confirm the correct .qbw file is selected\n- Close extra QB windows/popups\n- Retry after QB finishes loading",
+            )
+
+    def _get_qb_item_catalog(self, store_name, *, force_refresh=False):
+        qbw_path = self._get_qbw_path_for_store(store_name)
         if not qbw_path:
             raise ValueError(f"Please choose a .qbw file for '{store_name}' before validating or creating QB items.")
         if not os.path.exists(qbw_path):
             raise ValueError(f"QB file not found for '{store_name}':\n{qbw_path}")
 
-        cache_key = (store_name, qbw_path.lower())
+        cache_key = self._get_catalog_cache_key(store_name, qbw_path)
         cached = self._qb_item_catalog_cache.get(cache_key)
+        age_seconds = None
         if cached and not force_refresh:
-            return cached
+            age_seconds = self._get_catalog_age_seconds(cached)
+            if age_seconds is not None and age_seconds <= QB_ITEM_CACHE_TTL_SECONDS:
+                self._set_mapping_item_status(
+                    f"Using cached QB catalog for {store_name} ({self._format_catalog_age(age_seconds)})",
+                    "#2563eb",
+                )
+                return cached
+            self._set_mapping_item_status(
+                f"QB catalog cache for {store_name} is stale ({self._format_catalog_age(age_seconds)}); refreshing...",
+                "#d97706",
+            )
+        if cached and force_refresh:
+            self._set_mapping_item_status(f"Refreshing QB catalog for {store_name}...", "#2563eb")
 
         from qb_automate import close_qb_completely, open_store, validate_company_file_path
         from qb_sync import QBSyncClient
@@ -1973,7 +2091,7 @@ class QBSyncTab(ctk.CTkFrame):
         finally:
             qb.disconnect()
 
-        catalog = {"qbw_path": qbw_path, "items": items}
+        catalog = {"qbw_path": qbw_path, "items": items, "loaded_at": time.time()}
         self._qb_item_catalog_cache[cache_key] = catalog
         self.status_var.set(f"Loaded {len(items)} QB items for {store_name}")
         return catalog
@@ -2091,6 +2209,7 @@ class QBSyncTab(ctk.CTkFrame):
         ITEM_CREATION_AUDIT_DIR.mkdir(parents=True, exist_ok=True)
         audit_files = write_item_creation_audit(payload, ITEM_CREATION_AUDIT_DIR)
         self.log(f"Item creation audit -> {audit_files['json_path']}")
+        self._refresh_item_creation_history()
         return audit_files
 
     def _ensure_qb_item_available(self, candidate, qb_item, *, allow_create):
@@ -2121,7 +2240,11 @@ class QBSyncTab(ctk.CTkFrame):
         if not allow_create:
             messagebox.showwarning(
                 "QB Item Not Found",
-                f"The QB item '{normalized_qb_item}' was not found in {store_name}.\n\nClose matches:\n{suggestion_text}",
+                (
+                    f"The QB item '{normalized_qb_item}' was not found in {store_name}.\n\n"
+                    f"Close matches:\n{suggestion_text}\n\n"
+                    "Use 'Create Missing Item' only if you are sure this item should exist in QuickBooks."
+                ),
             )
             return False
 
@@ -2216,10 +2339,31 @@ class QBSyncTab(ctk.CTkFrame):
             messagebox.showwarning("QB Item Required", "Enter a QuickBooks item name before checking.")
             return
         try:
-            self._ensure_qb_item_available(self.selected_mapping_candidate, qb_item, allow_create=True)
+            self._ensure_qb_item_available(self.selected_mapping_candidate, qb_item, allow_create=False)
         except Exception as exc:
             self._set_mapping_item_status("QB item check failed", "#dc2626")
-            messagebox.showerror("QB Item Check Failed", str(exc))
+            messagebox.showerror(
+                "QB Item Check Failed",
+                f"{exc}\n\nRecovery tips:\n- Confirm the correct .qbw file is selected\n- Refresh the QB catalog if items were recently added\n- Retry after QuickBooks finishes loading",
+            )
+
+    def _create_selected_mapping_item(self):
+        if not self.selected_mapping_candidate:
+            return
+        qb_item = self.mapping_qb_item_var.get().strip()
+        if not qb_item:
+            messagebox.showwarning("QB Item Required", "Enter a QuickBooks item name before creating it.")
+            return
+        try:
+            created = self._ensure_qb_item_available(self.selected_mapping_candidate, qb_item, allow_create=True)
+            if created:
+                self._set_mapping_item_status("QB item is ready. You can save the mapping now.", "#16a34a")
+        except Exception as exc:
+            self._set_mapping_item_status("QB item create failed", "#dc2626")
+            messagebox.showerror(
+                "QB Item Create Failed",
+                f"{exc}\n\nRecovery tips:\n- Confirm the correct .qbw file is selected\n- Close extra QB popups/windows\n- Retry after QuickBooks finishes loading",
+            )
 
     def _apply_mapping_save(self, *, rerun_preview: bool):
         if not self.selected_mapping_candidate:
@@ -2240,11 +2384,14 @@ class QBSyncTab(ctk.CTkFrame):
                 messagebox.showwarning("Type Required", "Select a valid marketplace mapping type: item, payment, or balance.")
                 return False
         try:
-            if not self._ensure_qb_item_available(self.selected_mapping_candidate, qb_item, allow_create=True):
+            if not self._ensure_qb_item_available(self.selected_mapping_candidate, qb_item, allow_create=False):
                 return False
         except Exception as exc:
             self._set_mapping_item_status("QB item validation failed", "#dc2626")
-            messagebox.showerror("QB Item Validation Failed", str(exc))
+            messagebox.showerror(
+                "QB Item Validation Failed",
+                f"{exc}\n\nSave was blocked. Run 'Check Existing Item' or 'Create Missing Item' first.",
+            )
             return False
         try:
             from mapping_maintenance import upsert_candidate_mapping

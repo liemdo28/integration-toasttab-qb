@@ -116,3 +116,22 @@ def write_item_creation_audit(payload: dict, base_dir: Path, prefix: str = "item
 
     json_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     return {"csv_path": str(csv_path), "json_path": str(json_path)}
+
+
+def load_recent_item_creation_audits(base_dir: Path, *, limit: int = 20) -> list[dict]:
+    base_dir = Path(base_dir)
+    if not base_dir.exists():
+        return []
+
+    records: list[dict] = []
+    for path in sorted(base_dir.glob("*_item-create.json"), key=lambda item: item.stat().st_mtime, reverse=True):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        payload["_audit_path"] = str(path)
+        payload["_modified_at"] = datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds")
+        records.append(payload)
+        if len(records) >= limit:
+            break
+    return records
