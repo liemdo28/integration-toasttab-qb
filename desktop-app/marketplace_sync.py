@@ -182,6 +182,8 @@ def extract_marketplace_receipt_lines(
                     f"{source_name} mapping column not found: {column}",
                     column=column,
                     qb_item=qb_item,
+                    mapping_type=entry_type,
+                    source_name=source_name,
                 )
             )
             continue
@@ -199,6 +201,8 @@ def extract_marketplace_receipt_lines(
                     f"{source_name} mapping has invalid Type: {entry_type}",
                     column=column,
                     qb_item=qb_item,
+                    mapping_type=entry_type,
+                    source_name=source_name,
                 )
             )
             continue
@@ -228,6 +232,9 @@ def extract_marketplace_receipt_lines(
                     "marketplace_unbalanced_receipt",
                     f"{source_name} receipt lines are not balanced by {balance}",
                     balance=str(balance),
+                    source_name=source_name,
+                    mapping_type="balance",
+                    column="auto-balance",
                 )
             )
 

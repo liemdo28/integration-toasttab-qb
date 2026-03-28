@@ -656,6 +656,25 @@ class QBSyncTab(ctk.CTkFrame):
             placeholder_text="Enter the QuickBooks item name to save into CSV map",
         )
         self.mapping_qb_item_entry.pack(side="left", padx=(0, 8))
+        ctk.CTkLabel(mapping_edit_row, text="Report / Column:").pack(side="left", padx=(4, 8))
+        self.mapping_report_var = ctk.StringVar(value="")
+        self.mapping_report_entry = ctk.CTkEntry(
+            mapping_edit_row,
+            textvariable=self.mapping_report_var,
+            width=220,
+            placeholder_text="CSV report value or marketplace column name",
+        )
+        self.mapping_report_entry.pack(side="left", padx=(0, 8))
+        ctk.CTkLabel(mapping_edit_row, text="Type:").pack(side="left", padx=(4, 8))
+        self.mapping_type_var = ctk.StringVar(value="item")
+        self.mapping_type_combo = ctk.CTkComboBox(
+            mapping_edit_row,
+            values=["item", "payment", "balance"],
+            variable=self.mapping_type_var,
+            width=110,
+            state="disabled",
+        )
+        self.mapping_type_combo.pack(side="left", padx=(0, 8))
         self.save_mapping_btn = ctk.CTkButton(
             mapping_edit_row,
             text="Save Mapping",
@@ -826,6 +845,40 @@ class QBSyncTab(ctk.CTkFrame):
         names = [self._get_primary_source_name(store_cfg)]
         names.extend(item.get("name", "") for item in store_cfg.get("additional_sale_receipts", []) if item.get("name"))
         return names
+
+    def _is_marketplace_mapping_candidate(self, candidate):
+        return bool(candidate and candidate.get("map_kind") == "marketplace")
+
+    def _record_sync_context(
+        self,
+        ledger,
+        sync_id,
+        *,
+        source_name,
+        report_path,
+        report_hash,
+        map_path,
+        selected_by_user,
+        source_mode,
+    ):
+        ledger.record_event(
+            sync_id,
+            "run_context",
+            {
+                "source_name": source_name,
+                "report_path": str(report_path),
+                "report_hash": report_hash,
+                "map_path": str(map_path),
+                "selected_by_user": bool(selected_by_user),
+                "source_mode": source_mode,
+            },
+        )
+
+    def _get_run_context(self, ledger, sync_id):
+        for event in ledger.get_run_events(sync_id):
+            if event.get("event_type") == "run_context":
+                return event.get("payload") or {}
+        return {}
 
     def log(self, msg):
         self.after(0, lambda: append_log(self.log_box, msg))
@@ -1092,7 +1145,7 @@ class QBSyncTab(ctk.CTkFrame):
                                     self.log(f"    {issue.format_line()}")
                             if strict_mode and has_blocking_issues(issues):
                                 self.log("  Strict mode blocked this sync because report validation issues were found")
-                                ledger.record_blocked_validation(
+                                blocked_sync_id = ledger.record_blocked_validation(
                                     store=display_name,
                                     date=date_str,
                                     source_name=primary_source_name,
@@ -1107,6 +1160,16 @@ class QBSyncTab(ctk.CTkFrame):
                                     validation_error_count=sum(1 for issue in issues if issue.severity == "error"),
                                     validation_warning_count=sum(1 for issue in issues if issue.severity == "warning"),
                                     error_message="Strict mode blocked this sync because report validation issues were found",
+                                )
+                                self._record_sync_context(
+                                    ledger,
+                                    blocked_sync_id,
+                                    source_name=primary_source_name,
+                                    report_path=filepath,
+                                    report_hash=report_identity.report_hash,
+                                    map_path=app_path("Map", store_cfg.get("csv_map", "")),
+                                    selected_by_user=False,
+                                    source_mode="toast_report",
                                 )
                                 fail_count += 1
                                 try:
@@ -1141,6 +1204,16 @@ class QBSyncTab(ctk.CTkFrame):
                                 override_reason=override_reason,
                             )
                             sync_id = begin_result.sync_id
+                            self._record_sync_context(
+                                ledger,
+                                sync_id,
+                                source_name=primary_source_name,
+                                report_path=filepath,
+                                report_hash=report_identity.report_hash,
+                                map_path=app_path("Map", store_cfg.get("csv_map", "")),
+                                selected_by_user=False,
+                                source_mode="toast_report",
+                            )
                             if begin_result.message and begin_result.message != "Sync run started.":
                                 self.log(f"  Ledger: {begin_result.message}")
                             if not begin_result.allowed:
@@ -1374,7 +1447,7 @@ class QBSyncTab(ctk.CTkFrame):
 
                 if strict_mode and any(issue.get("blocking") for issue in issues):
                     self.log(f"  Strict mode blocked {source.name} receipt because validation issues were found")
-                    ledger.record_blocked_validation(
+                    blocked_sync_id = ledger.record_blocked_validation(
                         store=display_name,
                         date=date_str,
                         source_name=source.name,
@@ -1389,6 +1462,16 @@ class QBSyncTab(ctk.CTkFrame):
                         validation_error_count=sum(1 for issue in issues if issue.get("severity") == "error"),
                         validation_warning_count=sum(1 for issue in issues if issue.get("severity") == "warning"),
                         error_message=f"Strict mode blocked {source.name} receipt because validation issues were found",
+                    )
+                    self._record_sync_context(
+                        ledger,
+                        blocked_sync_id,
+                        source_name=source.name,
+                        report_path=report_path,
+                        report_hash=report_identity.report_hash,
+                        map_path=app_path("Map", source.csv_map),
+                        selected_by_user=source.selected_by_user,
+                        source_mode="marketplace_upload",
                     )
                     fail_count += 1
                     continue
@@ -1415,6 +1498,16 @@ class QBSyncTab(ctk.CTkFrame):
                     override_reason=override_reason,
                 )
                 sync_id = begin_result.sync_id
+                self._record_sync_context(
+                    ledger,
+                    sync_id,
+                    source_name=source.name,
+                    report_path=report_path,
+                    report_hash=report_identity.report_hash,
+                    map_path=app_path("Map", source.csv_map),
+                    selected_by_user=source.selected_by_user,
+                    source_mode="marketplace_upload",
+                )
                 if begin_result.message and begin_result.message != "Sync run started.":
                     self.log(f"  Ledger: {begin_result.message}")
                 if not begin_result.allowed:
@@ -1532,6 +1625,7 @@ class QBSyncTab(ctk.CTkFrame):
             color = "#d97706"
 
         hash_short = (run.get("report_hash") or "")[:12]
+        context = run.get("context") or {}
         lines = [
             f"Store: {run.get('store')}",
             f"Date: {run.get('date')}",
@@ -1544,6 +1638,8 @@ class QBSyncTab(ctk.CTkFrame):
             f"Preview: {'yes' if run.get('preview') else 'no'}",
             f"Strict Mode: {'yes' if run.get('strict_mode') else 'no'}",
             f"QB File: {run.get('qb_company_file') or '-'}",
+            f"Report Path: {context.get('report_path') or run.get('report_path') or '-'}",
+            f"Map File: {context.get('map_path') or '-'}",
             f"Error: {run.get('error_message') or '-'}",
             f"Override Reason: {run.get('override_reason') or '-'}",
         ]
@@ -1568,11 +1664,17 @@ class QBSyncTab(ctk.CTkFrame):
         lines = []
         for run in runs:
             status = run.get("status", "unknown")
+            context = run.get("context") or {}
             lines.extend(
                 [
                     f"{run.get('source_name') or 'Unknown'} | {status}",
                     f"  Ref: {run.get('ref_number') or '-'}",
                     f"  Report: {Path(run.get('report_path') or '-').name if run.get('report_path') else '-'}",
+                    f"  Path: {context.get('report_path') or run.get('report_path') or '-'}",
+                    f"  Hash: {(context.get('report_hash') or run.get('report_hash') or '')[:16] or '-'}",
+                    f"  Map File: {context.get('map_path') or '-'}",
+                    f"  Source Mode: {context.get('source_mode') or '-'}",
+                    f"  Selected By User: {'yes' if context.get('selected_by_user') else 'no'}",
                     f"  Finished: {run.get('finished_at') or run.get('started_at') or '-'}",
                     f"  Error: {run.get('error_message') or '-'}",
                     "",
@@ -1587,6 +1689,9 @@ class QBSyncTab(ctk.CTkFrame):
 
             ledger = SyncLedger()
             latest_by_source = {run.get("source_name") or "Unknown": run for run in ledger.get_latest_runs_by_source(store, date)}
+            for run in latest_by_source.values():
+                if run.get("sync_id"):
+                    run["context"] = self._get_run_context(ledger, run["sync_id"])
         except Exception as exc:
             self._set_source_sync_statuses([], f"Could not load source-level status: {exc}")
             return
@@ -1602,9 +1707,11 @@ class QBSyncTab(ctk.CTkFrame):
                         "status": "not_run",
                         "ref_number": "",
                         "report_path": "",
+                        "report_hash": "",
                         "finished_at": "",
                         "started_at": "",
                         "error_message": "No run recorded for this source/date yet.",
+                        "context": {},
                     }
                 )
         ordered_runs.extend(latest_by_source.values())
@@ -1620,6 +1727,11 @@ class QBSyncTab(ctk.CTkFrame):
 
             ledger = SyncLedger()
             run = ledger.get_last_run(store, date)
+            if run and run.get("sync_id"):
+                context = self._get_run_context(ledger, run["sync_id"])
+                if context:
+                    run = dict(run)
+                    run["context"] = context
             self._set_last_sync_status(run)
             self._refresh_source_sync_statuses(store, date)
         except Exception as exc:
@@ -1679,6 +1791,10 @@ class QBSyncTab(ctk.CTkFrame):
         if not candidate:
             self.mapping_summary.configure(text=message or "No unmapped issues to fix yet", text_color="gray")
             self.mapping_qb_item_var.set("")
+            self.mapping_report_var.set("")
+            self.mapping_type_var.set("item")
+            self.mapping_report_entry.configure(state="disabled")
+            self.mapping_type_combo.configure(state="disabled")
             self.mapping_candidate_combo.configure(values=["No mappable validation issues"], state="disabled")
             self.mapping_candidate_combo.set("No mappable validation issues")
             self.save_mapping_btn.configure(state="disabled")
@@ -1696,6 +1812,15 @@ class QBSyncTab(ctk.CTkFrame):
             self.mapping_candidate_combo.configure(state="readonly")
         self.mapping_candidate_combo.set(label)
         self.mapping_qb_item_var.set(candidate.get("current_qb") or "")
+        self.mapping_report_var.set(candidate.get("report") or "")
+        candidate_type = candidate.get("mapping_type") or "item"
+        self.mapping_type_var.set(candidate_type if candidate_type in {"item", "payment", "balance"} else "item")
+        if self._is_marketplace_mapping_candidate(candidate):
+            self.mapping_report_entry.configure(state="normal")
+            self.mapping_type_combo.configure(state="readonly")
+        else:
+            self.mapping_report_entry.configure(state="disabled")
+            self.mapping_type_combo.configure(state="disabled")
         lines = [
             f"Store: {candidate.get('store')}",
             f"Date: {candidate.get('date')}",
@@ -1703,12 +1828,35 @@ class QBSyncTab(ctk.CTkFrame):
             f"Report Value: {candidate.get('report')}",
             f"CSV Note: {candidate.get('note')}",
             f"Current QB Item: {candidate.get('current_qb') or '-'}",
-            "",
-            "This will save or update a row in the store CSV map:",
-            f"  QB     = {self.mapping_qb_item_var.get().strip() or '<enter QB item>'}",
-            f"  Report = {candidate.get('report')}",
-            f"  Note   = {candidate.get('note')}",
+            f"Map Kind: {candidate.get('map_kind') or 'toast'}",
+            f"Map File: {candidate.get('map_path') or '-'}",
         ]
+        if candidate.get("source_name"):
+            lines.append(f"Source: {candidate.get('source_name')}")
+        if candidate.get("mapping_type"):
+            lines.append(f"Mapping Type: {candidate.get('mapping_type')}")
+        invalid_type = ((candidate.get("meta") or {}).get("mapping_type") or "").strip().lower()
+        if invalid_type and invalid_type not in {"item", "payment", "balance"}:
+            lines.append(f"Invalid Type Seen: {invalid_type}")
+        if candidate.get("guidance"):
+            lines.extend(["", f"Guidance: {candidate.get('guidance')}"])
+        lines.extend(["", "This will save or update the selected CSV map row:"])
+        if self._is_marketplace_mapping_candidate(candidate):
+            lines.extend(
+                [
+                    f"  QB     = {self.mapping_qb_item_var.get().strip() or '<enter QB item>'}",
+                    f"  Column = {self.mapping_report_var.get().strip() or '<enter column>'}",
+                    f"  Type   = {self.mapping_type_var.get().strip() or '<select type>'}",
+                ]
+            )
+        else:
+            lines.extend(
+                [
+                    f"  QB     = {self.mapping_qb_item_var.get().strip() or '<enter QB item>'}",
+                    f"  Report = {candidate.get('report')}",
+                    f"  Note   = {candidate.get('note')}",
+                ]
+            )
         self.mapping_detail_box.insert("end", "\n".join(lines))
         self.mapping_detail_box.configure(state="disabled")
         self.save_mapping_btn.configure(state="normal")
@@ -1750,12 +1898,32 @@ class QBSyncTab(ctk.CTkFrame):
         if not qb_item:
             messagebox.showwarning("QB Item Required", "Enter a QuickBooks item name before saving the mapping.")
             return False
+        override_report = None
+        override_type = None
+        if self._is_marketplace_mapping_candidate(self.selected_mapping_candidate):
+            override_report = self.mapping_report_var.get().strip()
+            override_type = self.mapping_type_var.get().strip().lower()
+            if not override_report:
+                messagebox.showwarning("Column Required", "Enter the CSV column name for this marketplace mapping.")
+                return False
+            if override_type not in {"item", "payment", "balance"}:
+                messagebox.showwarning("Type Required", "Select a valid marketplace mapping type: item, payment, or balance.")
+                return False
         try:
             from mapping_maintenance import upsert_candidate_mapping
 
-            result = upsert_candidate_mapping(self.selected_mapping_candidate, qb_item)
+            result = upsert_candidate_mapping(
+                self.selected_mapping_candidate,
+                qb_item,
+                override_report=override_report,
+                override_type=override_type,
+            )
             candidate = dict(self.selected_mapping_candidate)
             candidate["current_qb"] = qb_item
+            if override_report is not None:
+                candidate["report"] = override_report
+            if override_type is not None:
+                candidate["mapping_type"] = override_type
             self.mapping_saved_keys.add(candidate["key"])
             self.log(
                 f"Mapping {result['action']} -> {candidate['store']} | {candidate['report']} | {candidate['note']} => {qb_item}"
