@@ -11,6 +11,8 @@ local-config.json
 toast-reports/
 *.log
 audit-logs/
+sync-ledger.db
+desktop-app/sync-ledger.db
 desktop-app/build/
 desktop-app/dist/
 desktop-app/release/

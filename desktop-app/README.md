@@ -98,6 +98,7 @@ Neu may build co Inno Setup (`ISCC.exe`), script se build them installer `.exe` 
 - Download Reports gio validate file `.xlsx` sau khi tai, retry neu download/validation fail, va ghi audit manifest vao `audit-logs\download-reports`
 - QB open/sync gio co `company-file guard` dua tren `qbw_match` de giam nguy co mo nham company file
 - Neu Toast session het han hoac password/login flow thay doi, app se hien warning ro rang va huong user sang `Settings -> Recovery Center`
+- QB Sync gio co `sync ledger` bang SQLite (`sync-ledger.db`) de block duplicate same-report, ghi preview/live run, va detect stale running sync
 
 ## Release planning
 

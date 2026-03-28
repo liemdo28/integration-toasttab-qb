@@ -231,6 +231,23 @@ def run_environment_checks(local_config: dict | None = None) -> DiagnosticReport
     else:
         _add(checks, "Delete Policy", "ok", "Live delete locked; dry-run mode enforced by default")
 
+    try:
+        from sync_ledger import SyncLedger
+
+        ledger = SyncLedger()
+        snapshot = ledger.diagnostics_snapshot()
+        _add(checks, "Sync Ledger", "ok", snapshot["db_path"])
+        if snapshot["stale_running_count"]:
+            _add(checks, "Sync Ledger Stale Runs", "warning", f"{snapshot['stale_running_count']} stale running sync(s)")
+        else:
+            _add(checks, "Sync Ledger Stale Runs", "ok", "No stale running syncs detected")
+        if snapshot["failed_count"]:
+            _add(checks, "Recent Failed Syncs", "warning", f"{snapshot['failed_count']} failed sync record(s) in ledger")
+        else:
+            _add(checks, "Recent Failed Syncs", "ok", "No failed syncs recorded")
+    except Exception as exc:
+        _add(checks, "Sync Ledger", "error", f"Ledger check failed: {exc}")
+
     _add(checks, "App Runtime Folder", "ok", str(RUNTIME_DIR))
     _add(checks, "Bundled Assets Folder", "ok", str(APP_DIR))
 

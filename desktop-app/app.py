@@ -626,6 +626,7 @@ class QBSyncTab(ctk.CTkFrame):
                 find_report_file,
                 summarize_validation_issues,
             )
+            from sync_ledger import SyncLedger, build_report_identity, STATUS_BLOCKED_DUPLICATE
 
             gdrive = None
             if source == "gdrive":
@@ -658,6 +659,7 @@ class QBSyncTab(ctk.CTkFrame):
             success_count = 0
             fail_count = 0
             validation_records = []
+            ledger = SyncLedger()
 
             # Group by qbw_match
             from collections import OrderedDict
@@ -723,8 +725,11 @@ class QBSyncTab(ctk.CTkFrame):
                         self.log(f"--- {display_name} / {date_str} ---")
 
                         try:
+                            sync_id = None
                             filepath = None
                             toast_loc = store_cfg.get("toast_location", orig_name)
+                            prefix = store_cfg.get("sale_no_prefix", "")
+                            ref_number = f"{prefix}{date_str.replace('-', '')}"
 
                             if gdrive:
                                 filename = f"SalesSummary_{date_str}_{date_str}.xlsx"
@@ -788,6 +793,8 @@ class QBSyncTab(ctk.CTkFrame):
                                 for warning in validation.warnings:
                                     self.log(f"    [WARN] report_validation_warning: {warning}")
 
+                            report_identity = build_report_identity(filepath)
+
                             reader = ToastExcelReader(filepath)
                             issues = []
                             lines = extract_receipt_lines(reader, store_cfg, issues=issues)
@@ -817,6 +824,21 @@ class QBSyncTab(ctk.CTkFrame):
                                     self.log(f"    {issue.format_line()}")
                             if strict_mode and has_blocking_issues(issues):
                                 self.log("  Strict mode blocked this sync because report validation issues were found")
+                                ledger.record_blocked_validation(
+                                    store=display_name,
+                                    date=date_str,
+                                    report_path=filepath,
+                                    report_hash=report_identity.report_hash,
+                                    report_size=report_identity.report_size,
+                                    report_mtime=report_identity.report_mtime,
+                                    ref_number=ref_number,
+                                    preview=preview,
+                                    strict_mode=strict_mode,
+                                    qb_company_file=qbw_match if not preview else "",
+                                    validation_error_count=sum(1 for issue in issues if issue.severity == "error"),
+                                    validation_warning_count=sum(1 for issue in issues if issue.severity == "warning"),
+                                    error_message="Strict mode blocked this sync because report validation issues were found",
+                                )
                                 fail_count += 1
                                 try:
                                     reader.close()
@@ -833,13 +855,53 @@ class QBSyncTab(ctk.CTkFrame):
                             except Exception:
                                 pass
 
+                            begin_result = ledger.begin_run(
+                                store=display_name,
+                                date=date_str,
+                                report_path=filepath,
+                                report_hash=report_identity.report_hash,
+                                report_size=report_identity.report_size,
+                                report_mtime=report_identity.report_mtime,
+                                ref_number=ref_number,
+                                preview=preview,
+                                strict_mode=strict_mode,
+                                qb_company_file=qbw_match if not preview else "",
+                                validation_error_count=sum(1 for issue in issues if issue.severity == "error"),
+                                validation_warning_count=sum(1 for issue in issues if issue.severity == "warning") + len(validation.warnings),
+                            )
+                            sync_id = begin_result.sync_id
+                            if begin_result.message and begin_result.message != "Sync run started.":
+                                self.log(f"  Ledger: {begin_result.message}")
+                            if not begin_result.allowed:
+                                self.log(f"  Ledger blocked this sync: {begin_result.message}")
+                                validation_records.append(
+                                    {
+                                        "store": display_name,
+                                        "date": date_str,
+                                        "report_path": filepath,
+                                        "summary": {"error": 1, "warning": 0, "info": 0},
+                                        "issues": [
+                                            {
+                                                "code": "blocked_duplicate",
+                                                "message": begin_result.message,
+                                                "severity": "error",
+                                                "blocking": True,
+                                            }
+                                        ],
+                                    }
+                                )
+                                fail_count += 1
+                                continue
+
                             if preview:
                                 self.log(f"  [PREVIEW MODE - not creating Sales Receipt]")
+                                ledger.mark_success(sync_id, preview=True)
                                 success_count += 1
                                 continue
 
                             if not qb_opened:
                                 self.log(f"  QB not open - skipping creation")
+                                ledger.mark_failed(sync_id, "QB not open - skipping creation")
                                 fail_count += 1
                                 continue
 
@@ -850,8 +912,6 @@ class QBSyncTab(ctk.CTkFrame):
                             qb.connect()
 
                             customer = store_cfg.get("customer_name", "Toast")
-                            prefix = store_cfg.get("sale_no_prefix", "")
-                            ref_number = f"{prefix}{date_str.replace('-', '')}"
                             memo = f"Toast {toast_loc} {date_str}"
 
                             existing_receipts = qb.find_existing_sales_receipts(ref_number)
@@ -859,6 +919,12 @@ class QBSyncTab(ctk.CTkFrame):
                             if exists:
                                 self.log(f"  Sales Receipt #{ref_number} already exists, skipping")
                                 qb.disconnect()
+                                ledger.mark_status(
+                                    sync_id,
+                                    STATUS_BLOCKED_DUPLICATE,
+                                    error_message="Sales Receipt already exists in QuickBooks",
+                                    payload={"ref_number": ref_number},
+                                )
                                 success_count += 1
                                 continue
                             if existing_receipts:
@@ -877,15 +943,22 @@ class QBSyncTab(ctk.CTkFrame):
 
                             if result.get("success"):
                                 self.log(f"  Sales Receipt created! TxnID: {result.get('txn_id')}")
+                                ledger.mark_success(sync_id, txn_id=result.get("txn_id"))
                                 success_count += 1
                             else:
                                 self.log(f"  Error: {result.get('error')}")
+                                ledger.mark_failed(sync_id, result.get("error") or "QuickBooks create_sales_receipt failed")
                                 fail_count += 1
 
                         except Exception as e:
                             self.log(f"  Error: {e}")
                             import traceback
                             self.log(traceback.format_exc())
+                            try:
+                                if sync_id:
+                                    ledger.mark_failed(sync_id, str(e))
+                            except Exception:
+                                pass
                             fail_count += 1
 
                 if not preview and qb_opened:
