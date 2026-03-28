@@ -114,8 +114,11 @@ class DownloadTab(ctk.CTkFrame):
         self._build_ui()
 
     def _build_ui(self):
+        content = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        content.pack(fill="both", expand=True)
+
         # ── Date Section ──
-        date_frame = ctk.CTkFrame(self)
+        date_frame = ctk.CTkFrame(content)
         date_frame.pack(fill="x", padx=15, pady=(15, 5))
 
         ctk.CTkLabel(date_frame, text="Date Range", font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=10, pady=(10, 5))
@@ -184,7 +187,7 @@ class DownloadTab(ctk.CTkFrame):
         ctk.CTkButton(btn_row, text="Last 30 days", width=100, command=lambda: set_last_n_days(30)).pack(side="left", padx=2)
 
         # ── Locations Section ──
-        loc_frame = ctk.CTkFrame(self)
+        loc_frame = ctk.CTkFrame(content)
         loc_frame.pack(fill="x", padx=15, pady=5)
         ctk.CTkLabel(loc_frame, text="Toast Locations", font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=10, pady=(10, 5))
 
@@ -202,27 +205,27 @@ class DownloadTab(ctk.CTkFrame):
         ctk.CTkButton(btn_row2, text="Deselect All", width=100, command=lambda: [v.set(False) for v in self.loc_vars.values()]).pack(side="left", padx=2)
 
         # ── Options ──
-        opt_frame = ctk.CTkFrame(self)
+        opt_frame = ctk.CTkFrame(content)
         opt_frame.pack(fill="x", padx=15, pady=5)
         self.upload_gdrive_var = ctk.BooleanVar(value=True)
         ctk.CTkCheckBox(opt_frame, text="Upload to Google Drive after download", variable=self.upload_gdrive_var).pack(anchor="w", padx=10, pady=10)
 
         # ── Action Button ──
-        self.download_btn = ctk.CTkButton(self, text="Download Reports",
+        self.download_btn = ctk.CTkButton(content, text="Download Reports",
                                             font=ctk.CTkFont(size=15, weight="bold"),
                                             height=45, command=self.start_download,
                                             fg_color="#2563eb", hover_color="#1d4ed8")
         self.download_btn.pack(fill="x", padx=15, pady=10)
 
         # ── Progress ──
-        self.progress_bar = ctk.CTkProgressBar(self)
+        self.progress_bar = ctk.CTkProgressBar(content)
         self.progress_bar.pack(fill="x", padx=15, pady=(0, 5))
         self.progress_bar.set(0)
-        self.progress_label = ctk.CTkLabel(self, text="Ready", text_color="gray")
+        self.progress_label = ctk.CTkLabel(content, text="Ready", text_color="gray")
         self.progress_label.pack(anchor="w", padx=15)
 
         # ── Log ──
-        self.log_box = make_log_box(self)
+        self.log_box = make_log_box(content)
 
     def log(self, msg):
         self.after(0, lambda: append_log(self.log_box, msg))
@@ -1293,8 +1296,11 @@ class SettingsTab(ctk.CTkFrame):
         self._build_ui()
 
     def _build_ui(self):
+        content = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        content.pack(fill="both", expand=True)
+
         # ── Google Drive ──
-        gdrive_frame = ctk.CTkFrame(self)
+        gdrive_frame = ctk.CTkFrame(content)
         gdrive_frame.pack(fill="x", padx=15, pady=(15, 5))
         ctk.CTkLabel(gdrive_frame, text="Google Drive", font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=10, pady=(10, 5))
         self.gdrive_status = ctk.CTkLabel(gdrive_frame, text="Not connected", text_color="gray")
@@ -1306,7 +1312,7 @@ class SettingsTab(ctk.CTkFrame):
         ctk.CTkButton(gdrive_btns, text="Clear Token", width=100, fg_color="#dc2626", hover_color="#b91c1c", command=self._clear_token).pack(side="left", padx=2)
 
         # ── Toast Session ──
-        toast_frame = ctk.CTkFrame(self)
+        toast_frame = ctk.CTkFrame(content)
         toast_frame.pack(fill="x", padx=15, pady=5)
         ctk.CTkLabel(toast_frame, text="Toast Session", font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=10, pady=(10, 5))
         session_file = SCRIPT_DIR / ".toast-session.json"
@@ -1321,7 +1327,7 @@ class SettingsTab(ctk.CTkFrame):
                        hover_color="#b91c1c", command=self._clear_session).pack(anchor="w", padx=10, pady=(5, 10))
 
         # ── QB Configuration ──
-        qb_frame = ctk.CTkFrame(self)
+        qb_frame = ctk.CTkFrame(content)
         qb_frame.pack(fill="x", padx=15, pady=5)
         ctk.CTkLabel(qb_frame, text="QuickBooks Desktop", font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=10, pady=(10, 5))
         env_file = SCRIPT_DIR / ".env.qb"
@@ -1338,7 +1344,7 @@ class SettingsTab(ctk.CTkFrame):
             pass
 
         # ── Appearance ──
-        theme_frame = ctk.CTkFrame(self)
+        theme_frame = ctk.CTkFrame(content)
         theme_frame.pack(fill="x", padx=15, pady=5)
         ctk.CTkLabel(theme_frame, text="Appearance", font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=10, pady=(10, 5))
         theme_row = ctk.CTkFrame(theme_frame, fg_color="transparent")
@@ -1350,7 +1356,7 @@ class SettingsTab(ctk.CTkFrame):
         self.theme_menu.pack(side="left")
 
         # ── Quick Links ──
-        folder_frame = ctk.CTkFrame(self)
+        folder_frame = ctk.CTkFrame(content)
         folder_frame.pack(fill="x", padx=15, pady=(5, 15))
         ctk.CTkLabel(folder_frame, text="Quick Links", font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=10, pady=(10, 5))
         links_row = ctk.CTkFrame(folder_frame, fg_color="transparent")
