@@ -713,6 +713,7 @@ class QBSyncTab(ctk.CTkFrame):
                 summarize_validation_issues,
             )
             from sync_ledger import SyncLedger, build_report_identity, STATUS_BLOCKED_DUPLICATE
+            from marketplace_sync import get_marketplace_sources_for_store
 
             gdrive = None
             if source == "gdrive":
@@ -740,7 +741,9 @@ class QBSyncTab(ctk.CTkFrame):
                 else:
                     expanded_stores.append((store_name, store_name, cfg))
 
-            total_tasks = len(expanded_stores) * len(dates)
+            total_tasks = 0
+            for _, _, cfg in expanded_stores:
+                total_tasks += len(dates) * (1 + len(get_marketplace_sources_for_store(cfg, map_dir=app_path("Map"))))
             current_task = 0
             success_count = 0
             fail_count = 0
@@ -816,6 +819,7 @@ class QBSyncTab(ctk.CTkFrame):
                             toast_loc = store_cfg.get("toast_location", orig_name)
                             prefix = store_cfg.get("sale_no_prefix", "")
                             ref_number = f"{prefix}{date_str.replace('-', '')}"
+                            override_reason = self.pending_force_reruns.get((orig_name, date_str))
 
                             if gdrive:
                                 filename = f"SalesSummary_{date_str}_{date_str}.xlsx"
@@ -954,7 +958,7 @@ class QBSyncTab(ctk.CTkFrame):
                                 qb_company_file=qbw_match if not preview else "",
                                 validation_error_count=sum(1 for issue in issues if issue.severity == "error"),
                                 validation_warning_count=sum(1 for issue in issues if issue.severity == "warning") + len(validation.warnings),
-                                override_reason=self.pending_force_reruns.get((orig_name, date_str)),
+                                override_reason=override_reason,
                             )
                             sync_id = begin_result.sync_id
                             if begin_result.message and begin_result.message != "Sync run started.":
@@ -984,6 +988,24 @@ class QBSyncTab(ctk.CTkFrame):
                                 self.log(f"  [PREVIEW MODE - not creating Sales Receipt]")
                                 ledger.mark_success(sync_id, preview=True)
                                 success_count += 1
+                                current_task, extra_success, extra_fail, extra_records = self._process_marketplace_receipts_for_date(
+                                    display_name=display_name,
+                                    orig_name=orig_name,
+                                    store_cfg=store_cfg,
+                                    date_str=date_str,
+                                    preview=preview,
+                                    strict_mode=strict_mode,
+                                    qb_opened=qb_opened,
+                                    qbw_match=qbw_match,
+                                    global_cfg=global_cfg,
+                                    ledger=ledger,
+                                    total_tasks=total_tasks,
+                                    current_task=current_task,
+                                    override_reason=override_reason,
+                                )
+                                success_count += extra_success
+                                fail_count += extra_fail
+                                validation_records.extend(extra_records)
                                 self.pending_force_reruns.pop((orig_name, date_str), None)
                                 continue
 
@@ -1033,6 +1055,24 @@ class QBSyncTab(ctk.CTkFrame):
                                 self.log(f"  Sales Receipt created! TxnID: {result.get('txn_id')}")
                                 ledger.mark_success(sync_id, txn_id=result.get("txn_id"))
                                 success_count += 1
+                                current_task, extra_success, extra_fail, extra_records = self._process_marketplace_receipts_for_date(
+                                    display_name=display_name,
+                                    orig_name=orig_name,
+                                    store_cfg=store_cfg,
+                                    date_str=date_str,
+                                    preview=preview,
+                                    strict_mode=strict_mode,
+                                    qb_opened=qb_opened,
+                                    qbw_match=qbw_match,
+                                    global_cfg=global_cfg,
+                                    ledger=ledger,
+                                    total_tasks=total_tasks,
+                                    current_task=current_task,
+                                    override_reason=override_reason,
+                                )
+                                success_count += extra_success
+                                fail_count += extra_fail
+                                validation_records.extend(extra_records)
                                 self.pending_force_reruns.pop((orig_name, date_str), None)
                             else:
                                 self.log(f"  Error: {result.get('error')}")
@@ -1071,6 +1111,203 @@ class QBSyncTab(ctk.CTkFrame):
             self._running = False
             self.after(0, lambda: self.sync_btn.configure(state="normal", text="Sync to QuickBooks"))
             self.after(0, lambda: self.status_var.set("Ready"))
+
+    def _process_marketplace_receipts_for_date(
+        self,
+        *,
+        display_name,
+        orig_name,
+        store_cfg,
+        date_str,
+        preview,
+        strict_mode,
+        qb_opened,
+        qbw_match,
+        global_cfg,
+        ledger,
+        total_tasks,
+        current_task,
+        override_reason,
+    ):
+        from marketplace_sync import extract_marketplace_receipt_lines, get_marketplace_sources_for_store
+        from sync_ledger import STATUS_BLOCKED_DUPLICATE, build_report_identity
+        from qb_sync import QBSyncClient
+
+        sources = get_marketplace_sources_for_store(store_cfg, map_dir=app_path("Map"))
+        success_count = 0
+        fail_count = 0
+        validation_records = []
+
+        for source in sources:
+            current_task += 1
+            self.update_progress(current_task, total_tasks, f"{display_name} - {date_str} - {source.name}")
+            self.log(f"--- {display_name} / {date_str} / {source.name} ---")
+
+            sync_id = None
+            try:
+                lines, issues, row = extract_marketplace_receipt_lines(
+                    report_path=source.report_path,
+                    date_str=date_str,
+                    map_path=app_path("Map", source.csv_map),
+                    source_name=source.name,
+                )
+                if row is None:
+                    self.log(f"  No {source.name} row for {date_str}; skipping")
+                    continue
+                if not lines:
+                    self.log(f"  No {source.name} lines found for {date_str}; skipping")
+                    continue
+
+                ref_number = f"{source.ref_prefix}{date_str.replace('-', '')}"
+                report_path = str(source.report_path)
+                report_identity = build_report_identity(report_path)
+
+                if issues:
+                    validation_records.append(
+                        {
+                            "store": display_name,
+                            "date": date_str,
+                            "source": source.name,
+                            "report_path": report_path,
+                            "summary": {
+                                "error": sum(1 for issue in issues if issue.get("severity") == "error"),
+                                "warning": sum(1 for issue in issues if issue.get("severity") == "warning"),
+                                "info": sum(1 for issue in issues if issue.get("severity") == "info"),
+                            },
+                            "issues": issues,
+                        }
+                    )
+                    self.log(f"  {source.name} validation issues found:")
+                    for issue in issues:
+                        self.log(f"    [{issue.get('severity', 'warning').upper()}] {issue['code']}: {issue['message']}")
+
+                if strict_mode and any(issue.get("blocking") for issue in issues):
+                    self.log(f"  Strict mode blocked {source.name} receipt because validation issues were found")
+                    ledger.record_blocked_validation(
+                        store=display_name,
+                        date=date_str,
+                        report_path=report_path,
+                        report_hash=report_identity.report_hash,
+                        report_size=report_identity.report_size,
+                        report_mtime=report_identity.report_mtime,
+                        ref_number=ref_number,
+                        preview=preview,
+                        strict_mode=strict_mode,
+                        qb_company_file=qbw_match if not preview else "",
+                        validation_error_count=sum(1 for issue in issues if issue.get("severity") == "error"),
+                        validation_warning_count=sum(1 for issue in issues if issue.get("severity") == "warning"),
+                        error_message=f"Strict mode blocked {source.name} receipt because validation issues were found",
+                    )
+                    fail_count += 1
+                    continue
+
+                for line in lines:
+                    amt = float(line["amount"])
+                    if amt != 0:
+                        self.log(f"    {line['item_name']:<30} {amt:>10.2f}")
+
+                begin_result = ledger.begin_run(
+                    store=display_name,
+                    date=date_str,
+                    report_path=report_path,
+                    report_hash=report_identity.report_hash,
+                    report_size=report_identity.report_size,
+                    report_mtime=report_identity.report_mtime,
+                    ref_number=ref_number,
+                    preview=preview,
+                    strict_mode=strict_mode,
+                    qb_company_file=qbw_match if not preview else "",
+                    validation_error_count=sum(1 for issue in issues if issue.get("severity") == "error"),
+                    validation_warning_count=sum(1 for issue in issues if issue.get("severity") == "warning"),
+                    override_reason=override_reason,
+                )
+                sync_id = begin_result.sync_id
+                if begin_result.message and begin_result.message != "Sync run started.":
+                    self.log(f"  Ledger: {begin_result.message}")
+                if not begin_result.allowed:
+                    self.log(f"  Ledger blocked this {source.name} sync: {begin_result.message}")
+                    validation_records.append(
+                        {
+                            "store": display_name,
+                            "date": date_str,
+                            "source": source.name,
+                            "report_path": report_path,
+                            "summary": {"error": 1, "warning": 0, "info": 0},
+                            "issues": [
+                                {
+                                    "code": "blocked_duplicate",
+                                    "message": begin_result.message,
+                                    "severity": "error",
+                                    "blocking": True,
+                                }
+                            ],
+                        }
+                    )
+                    fail_count += 1
+                    continue
+
+                if preview:
+                    self.log(f"  [PREVIEW MODE - not creating {source.name} Sales Receipt]")
+                    ledger.mark_success(sync_id, preview=True)
+                    success_count += 1
+                    continue
+
+                if not qb_opened:
+                    self.log(f"  QB not open - skipping {source.name} creation")
+                    ledger.mark_failed(sync_id, f"QB not open - skipping {source.name} creation")
+                    fail_count += 1
+                    continue
+
+                qb = QBSyncClient(
+                    app_name=global_cfg.get("app_name", "Toast Report Sync"),
+                    qbxml_version=global_cfg.get("qbxml_version", "13.0"),
+                )
+                qb.connect()
+
+                existing_receipts = qb.find_existing_sales_receipts(ref_number)
+                exists = any(item["txn_date"] == date_str for item in existing_receipts)
+                if exists:
+                    self.log(f"  {source.name} Sales Receipt #{ref_number} already exists, skipping")
+                    qb.disconnect()
+                    ledger.mark_status(
+                        sync_id,
+                        STATUS_BLOCKED_DUPLICATE,
+                        error_message="Sales Receipt already exists in QuickBooks",
+                        payload={"ref_number": ref_number, "source": source.name},
+                    )
+                    success_count += 1
+                    continue
+
+                result = qb.create_sales_receipt(
+                    txn_date=date_str,
+                    ref_number=ref_number,
+                    customer_name=source.customer_name,
+                    memo=f"{source.name} {display_name} {date_str}",
+                    lines=lines,
+                    class_name=store_cfg.get("class_name"),
+                )
+                qb.disconnect()
+
+                if result.get("success"):
+                    self.log(f"  {source.name} Sales Receipt created! TxnID: {result.get('txn_id')}")
+                    ledger.mark_success(sync_id, txn_id=result.get("txn_id"))
+                    success_count += 1
+                else:
+                    self.log(f"  Error: {result.get('error')}")
+                    ledger.mark_failed(sync_id, result.get("error") or f"{source.name} create_sales_receipt failed")
+                    fail_count += 1
+            except Exception as exc:
+                self.log(f"  {source.name} error: {exc}")
+                import traceback
+                self.log(traceback.format_exc())
+                try:
+                    if sync_id:
+                        ledger.mark_failed(sync_id, str(exc))
+                except Exception:
+                    pass
+                fail_count += 1
+
+        return current_task, success_count, fail_count, validation_records
 
     def _status_target(self):
         stores = [name for name, var in self.store_vars.items() if var.get()]

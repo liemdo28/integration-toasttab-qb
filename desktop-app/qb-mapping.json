@@ -34,9 +34,32 @@
       "qbw_match": "rawstockton",
       "password": "pass2",
       "toast_location": "Stockton",
-      "customer_name": "Toast",
+      "customer_name": "Toasttab",
       "sale_no_prefix": "",
-      "csv_map": "raw.csv"
+      "csv_map": "raw.csv",
+      "additional_sale_receipts": [
+        {
+          "name": "Uber",
+          "customer_name": "Uber",
+          "ref_prefix": "UE",
+          "file_name": "UberSale.csv",
+          "csv_map": "uber_raw.csv"
+        },
+        {
+          "name": "DoorDash",
+          "customer_name": "DoorDash",
+          "ref_prefix": "DD",
+          "file_name": "DoordashSale.csv",
+          "csv_map": "doordash_raw.csv"
+        },
+        {
+          "name": "Grubhub",
+          "customer_name": "Grubhub",
+          "ref_prefix": "GH",
+          "file_name": "GrubhubSale.csv",
+          "csv_map": "grubhub_raw.csv"
+        }
+      ]
     },
 
     "Stone Oak": {
