@@ -19,6 +19,8 @@ DEFAULT_DOWNLOAD_DIR = str(runtime_path("toast-reports"))
 DOWNLOAD_AUDIT_DIR = runtime_path("audit-logs", "download-reports")
 
 TOAST_LOCATIONS = ["Stockton", "The Rim", "Stone Oak", "Bandera", "WA1", "WA2", "WA3"]
+LOGIN_WAIT_TIMEOUT_SECONDS = 5 * 60
+LOGIN_WAIT_POLL_SECONDS = 5
 
 
 class ToastLoginRequiredError(RuntimeError):
@@ -83,6 +85,35 @@ class ToastDownloader:
             self.close()
             raise
 
+    def _wait_for_manual_login(self, timeout_seconds=LOGIN_WAIT_TIMEOUT_SECONDS, poll_seconds=LOGIN_WAIT_POLL_SECONDS):
+        deadline = time.time() + max(1, int(timeout_seconds))
+        poll_seconds = max(1, int(poll_seconds))
+        last_logged_remaining = None
+        while time.time() < deadline:
+            current_url = ""
+            try:
+                current_url = self.page.url
+            except Exception:
+                current_url = ""
+            if self._is_logged_in(current_url):
+                return True
+
+            remaining = max(0, int(deadline - time.time()))
+            remaining_bucket = ((remaining + 29) // 30) * 30
+            if last_logged_remaining != remaining_bucket:
+                minutes = remaining_bucket // 60
+                seconds = remaining_bucket % 60
+                if minutes:
+                    self.log(f"Waiting for Toast login... {minutes}m {seconds:02d}s remaining")
+                else:
+                    self.log(f"Waiting for Toast login... {seconds}s remaining")
+                self.on_progress(0, 1, f"Toast login pending ({remaining}s left)")
+                last_logged_remaining = remaining_bucket
+
+            self.page.wait_for_timeout(poll_seconds * 1000)
+
+        return False
+
     def _login(self):
         """Navigate to Toast and handle login if needed."""
         self.log("Opening Toast...")
@@ -106,10 +137,8 @@ class ToastDownloader:
 
             self.log("Please login in the browser window... (5 min timeout)")
             try:
-                self.page.wait_for_url(
-                    lambda u: self._is_logged_in(u),
-                    timeout=5 * 60 * 1000,
-                )
+                if not self._wait_for_manual_login():
+                    raise PWTimeout("Toast login timed out")
             except PWTimeout as exc:
                 raise ToastLoginRequiredError(
                     "Toast login did not complete in time. If the password changed or Toast asked for a new auth step, "
