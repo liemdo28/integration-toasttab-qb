@@ -1,0 +1,14 @@
+{
+  "name": "review-management-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:connection": "node scripts/test-connection.mjs",
+    "notify:pending": "node scripts/notify-pending.mjs",
+    "run:daily": "node scripts/run-daily.mjs"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5"
+  }
+}
